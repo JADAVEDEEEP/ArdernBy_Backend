@@ -34,6 +34,10 @@ app.use("/api/wishlist", wishlistRouter);
 app.use("/api/subscriptions", subscriptionRouter);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/orders", orderRoutes);
+
+app.get("/",(req,res)=>{
+  res.send("Welcome to ArdenBy API")
+})
 const PORT = 5000;
 
 app.listen(PORT, () => {
