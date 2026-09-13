@@ -1,11 +1,15 @@
+const dns = require('dns');
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',  // <-- FIXED: Changed from '://gmail.com'
+  host: 'smtp.gmail.com',
   port: 587,
   secure: false,
-  family: 4,
-  localAddress: '0.0.0.0', 
+
+  lookup: (hostname, options, callback) => {
+    dns.lookup(hostname, { family: 4 }, callback);
+  },
+
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
