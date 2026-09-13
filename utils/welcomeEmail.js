@@ -148,11 +148,11 @@ const sendWelcomeEmail = async ({ email, name }) => {
   `;
 
   await transporter.sendMail({
-    from: `"ARDENBY" <${process.env.EMAIL_USER}>`,
-    to: email,
-    subject: `Welcome in, ${firstName}. ARDENBY is yours now.`,
-    html,
-  });
+  from: `"ARDENBY" <${process.env.BREVO_FROM_EMAIL}>`,
+  to: email,
+  subject: `Welcome in, ${firstName}. ARDENBY is yours now.`,
+  html,
+});
 };
 
 module.exports = sendWelcomeEmail;
