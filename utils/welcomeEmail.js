@@ -1,4 +1,7 @@
-const transporter = require("../config/mailer");
+const {
+  transporter,
+  getBrevoSender,
+} = require("../config/mailer");
 
 const SITE_URL = "https://ardenby.vercel.app";
 
@@ -147,12 +150,18 @@ const sendWelcomeEmail = async ({ email, name }) => {
   </html>
   `;
 
+  const sender = getBrevoSender();
+
   await transporter.sendMail({
-  from: `"ARDENBY" <${process.env.BREVO_FROM_EMAIL}>`,
-  to: email,
-  subject: `Welcome in, ${firstName}. ARDENBY is yours now.`,
-  html,
-});
+    from: sender.from,
+    envelope: {
+      from: sender.envelopeFrom,
+      to: email,
+    },
+    to: email,
+    subject: `Welcome in, ${firstName}. ARDENBY is yours now.`,
+    html,
+  });
 };
 
 module.exports = sendWelcomeEmail;

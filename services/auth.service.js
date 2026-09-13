@@ -3,7 +3,10 @@ const jwt = require("jsonwebtoken");
 
 const { sql, poolPromise } = require("../config/sql");
 
-const transporter = require("../config/mailer");
+const {
+  transporter,
+  getBrevoSender,
+} = require("../config/mailer");
 const sendWelcomeEmail = require("../utils/welcomeEmail");
 const { OAuth2Client } = require("google-auth-library");
 
@@ -240,8 +243,14 @@ const sendOTP = async ({
     `);
 
   // Send OTP email
+  const sender = getBrevoSender();
+
   await transporter.sendMail({
-    from: `"ARDENBY" <${process.env.EMAIL_USER}>`,
+    from: sender.from,
+    envelope: {
+      from: sender.envelopeFrom,
+      to: email,
+    },
     to: email,
     subject: "Your ARDENBY Verification Code",
 

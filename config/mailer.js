@@ -10,4 +10,23 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-module.exports = transporter;
+const getBrevoSender = () => {
+  const address = process.env.BREVO_FROM_EMAIL?.trim();
+
+  if (!address) {
+    throw new Error('BREVO_FROM_EMAIL is required.');
+  }
+
+  return {
+    from: {
+      name: 'ARDENBY',
+      address,
+    },
+    envelopeFrom: address,
+  };
+};
+
+module.exports = {
+  transporter,
+  getBrevoSender,
+};
