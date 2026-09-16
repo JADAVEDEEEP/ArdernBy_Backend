@@ -40,8 +40,6 @@ const getProducts = async (req, res) => {
 
 const getProduct = async (req, res) => {
   try {
-
-    req.body.fit = req.body.fit?.trim();
     
     const { slug } = req.params;
     

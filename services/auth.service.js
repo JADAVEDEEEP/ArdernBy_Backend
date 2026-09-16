@@ -7,6 +7,7 @@ const {
   transporter,
   getBrevoSender,
 } = require("../config/mailer");
+const { getJwtSecret } = require("../config/jwt");
 const sendWelcomeEmail = require("../utils/welcomeEmail");
 const { OAuth2Client } = require("google-auth-library");
 
@@ -31,7 +32,7 @@ const generateToken = (user) => {
       email: user.email,
       role: user.role,
     },
-    process.env.JWT_SECRET,
+    getJwtSecret(),
     {
       expiresIn: "7d",
     }
@@ -750,7 +751,7 @@ const verifyUserOTP = async ({
         email: user.email,
         purpose: "password_reset",
       },
-      process.env.JWT_SECRET,
+      getJwtSecret(),
       {
         expiresIn: "10m",
       }
@@ -926,7 +927,7 @@ const resetPassword = async ({
   try {
     decoded = jwt.verify(
       resetToken,
-      process.env.JWT_SECRET
+      getJwtSecret()
     );
   } catch (error) {
     throw new Error(
