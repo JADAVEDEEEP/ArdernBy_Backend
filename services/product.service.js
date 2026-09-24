@@ -828,6 +828,27 @@ const deleteProduct = async (id) => {
   }
 
   // ==========================================
+  // CHECK IF VARIANTS ARE USED IN ORDERS
+  // ==========================================
+
+  const orderVariantResult = await pool
+    .request()
+    .input("productId", sql.NVarChar(100), id)
+    .query(`
+      SELECT TOP 1 pv.id
+      FROM dbo.product_variants pv
+      INNER JOIN dbo.order_items oi
+        ON oi.variant_id = pv.id
+      WHERE pv.product_id = @productId;
+    `);
+
+  if (orderVariantResult.recordset.length > 0) {
+    throw new Error(
+      "This product cannot be deleted because one or more of its variants are already used in an order."
+    );
+  }
+
+  // ==========================================
   // GET PRODUCT IMAGES
   // ==========================================
 
