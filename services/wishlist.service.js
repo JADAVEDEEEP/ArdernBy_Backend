@@ -1,4 +1,4 @@
-const { sql, poolPromise } = require("../config/sql");
+const { poolPromise } = require("../config/sql");
 
 // ==========================================
 // GET USER WISHLIST
@@ -7,10 +7,8 @@ const { sql, poolPromise } = require("../config/sql");
 const getWishlist = async (userId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         w.id,
         w.product_id,
@@ -33,26 +31,29 @@ const getWishlist = async (userId) => {
         p.inventory,
 
         (
-          SELECT TOP 1
-            pi.image_url
+          SELECT pi.image_url
           FROM product_images pi
           WHERE pi.product_id = p.id
             AND pi.is_primary = 1
           ORDER BY pi.sort_order ASC
+          LIMIT 1
         ) AS primary_image,
 
         w.created_at
 
       FROM wishlist_items w
+
       INNER JOIN products p
         ON w.product_id = p.id
 
-      WHERE w.user_id = @userId
+      WHERE w.user_id = ?
 
       ORDER BY w.created_at DESC
-    `);
+    `,
+    [userId]
+  );
 
-  return result.recordset;
+  return rows;
 };
 
 // ==========================================
@@ -65,48 +66,57 @@ const addToWishlist = async ({
 }) => {
   const pool = await poolPromise;
 
-  // Check product exists
-  const productResult = await pool
-    .request()
-    .input("productId", sql.NVarChar(100), productId)
-    .query(`
-      SELECT TOP 1
+  // ==========================================
+  // CHECK PRODUCT EXISTS
+  // ==========================================
+
+  const [productRows] = await pool.execute(
+    `
+      SELECT
         id,
         name,
         inventory
       FROM products
-      WHERE id = @productId
-    `);
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [productId]
+  );
 
-  if (productResult.recordset.length === 0) {
+  if (productRows.length === 0) {
     throw new Error("Product not found.");
   }
 
-  // Check already exists
-  const existingResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("productId", sql.NVarChar(100), productId)
-    .query(`
-      SELECT TOP 1 id
+  // ==========================================
+  // CHECK ALREADY EXISTS
+  // ==========================================
+
+  const [existingRows] = await pool.execute(
+    `
+      SELECT id
       FROM wishlist_items
       WHERE
-        user_id = @userId
-        AND product_id = @productId
-    `);
+        user_id = ?
+        AND product_id = ?
+      LIMIT 1
+    `,
+    [userId, productId]
+  );
 
-  if (existingResult.recordset.length > 0) {
+  if (existingRows.length > 0) {
     throw new Error(
       "Product is already in your wishlist."
     );
   }
 
-  // Add wishlist item
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("productId", sql.NVarChar(100), productId)
-    .query(`
+  // ==========================================
+  // ADD WISHLIST ITEM
+  // ==========================================
+
+  const wishlistId = require("crypto").randomUUID();
+
+  await pool.execute(
+    `
       INSERT INTO wishlist_items
       (
         id,
@@ -114,21 +124,39 @@ const addToWishlist = async ({
         product_id,
         created_at
       )
-      OUTPUT
-        INSERTED.id,
-        INSERTED.user_id,
-        INSERTED.product_id,
-        INSERTED.created_at
       VALUES
       (
-        NEWID(),
-        @userId,
-        @productId,
-        SYSUTCDATETIME()
+        ?,
+        ?,
+        ?,
+        UTC_TIMESTAMP(6)
       )
-    `);
+    `,
+    [
+      wishlistId,
+      userId,
+      productId,
+    ]
+  );
 
-  return result.recordset[0];
+  // MySQL does not support SQL Server's
+  // OUTPUT INSERTED, so fetch the inserted row.
+
+  const [rows] = await pool.execute(
+    `
+      SELECT
+        id,
+        user_id,
+        product_id,
+        created_at
+      FROM wishlist_items
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [wishlistId]
+  );
+
+  return rows[0];
 };
 
 // ==========================================
@@ -141,28 +169,50 @@ const removeFromWishlist = async ({
 }) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("productId", sql.NVarChar(100), productId)
-    .query(`
-      DELETE FROM wishlist_items
-      OUTPUT
-        DELETED.id,
-        DELETED.user_id,
-        DELETED.product_id
-      WHERE
-        user_id = @userId
-        AND product_id = @productId
-    `);
+  // MySQL does not support SQL Server's
+  // DELETE ... OUTPUT DELETED syntax.
+  // First find the item, then delete it.
 
-  if (result.recordset.length === 0) {
+  const [existingRows] = await pool.execute(
+    `
+      SELECT
+        id,
+        user_id,
+        product_id
+      FROM wishlist_items
+      WHERE
+        user_id = ?
+        AND product_id = ?
+      LIMIT 1
+    `,
+    [
+      userId,
+      productId,
+    ]
+  );
+
+  if (existingRows.length === 0) {
     throw new Error(
       "Product is not in your wishlist."
     );
   }
 
-  return result.recordset[0];
+  const wishlistItem = existingRows[0];
+
+  await pool.execute(
+    `
+      DELETE FROM wishlist_items
+      WHERE
+        user_id = ?
+        AND product_id = ?
+    `,
+    [
+      userId,
+      productId,
+    ]
+  );
+
+  return wishlistItem;
 };
 
 // ==========================================
@@ -175,19 +225,22 @@ const isInWishlist = async ({
 }) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("productId", sql.NVarChar(100), productId)
-    .query(`
-      SELECT TOP 1 id
+  const [rows] = await pool.execute(
+    `
+      SELECT id
       FROM wishlist_items
       WHERE
-        user_id = @userId
-        AND product_id = @productId
-    `);
+        user_id = ?
+        AND product_id = ?
+      LIMIT 1
+    `,
+    [
+      userId,
+      productId,
+    ]
+  );
 
-  return result.recordset.length > 0;
+  return rows.length > 0;
 };
 
 // ==========================================
@@ -197,16 +250,16 @@ const isInWishlist = async ({
 const clearWishlist = async (userId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [result] = await pool.execute(
+    `
       DELETE FROM wishlist_items
-      WHERE user_id = @userId
-    `);
+      WHERE user_id = ?
+    `,
+    [userId]
+  );
 
   return {
-    deletedCount: result.rowsAffected[0],
+    deletedCount: result.affectedRows,
   };
 };
 

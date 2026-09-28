@@ -1,4 +1,5 @@
-const { sql, poolPromise } = require("../config/sql");
+const { randomUUID } = require("crypto");
+const { poolPromise } = require("../config/sql");
 
 // ==========================================
 // GET ALL ADDRESSES
@@ -7,10 +8,8 @@ const { sql, poolPromise } = require("../config/sql");
 const getAddresses = async (userId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         id,
         user_id,
@@ -25,11 +24,13 @@ const getAddresses = async (userId) => {
         created_at,
         updated_at
       FROM addresses
-      WHERE user_id = @userId
+      WHERE user_id = ?
       ORDER BY is_default DESC, created_at DESC
-    `);
+    `,
+    [userId]
+  );
 
-  return result.recordset;
+  return rows;
 };
 
 // ==========================================
@@ -39,11 +40,8 @@ const getAddresses = async (userId) => {
 const getAddressById = async (userId, addressId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         id,
         user_id,
@@ -59,15 +57,18 @@ const getAddressById = async (userId, addressId) => {
         updated_at
       FROM addresses
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+      LIMIT 1
+    `,
+    [addressId, userId]
+  );
 
-  if (result.recordset.length === 0) {
+  if (rows.length === 0) {
     throw new Error("Address not found.");
   }
 
-  return result.recordset[0];
+  return rows[0];
 };
 
 // ==========================================
@@ -92,38 +93,23 @@ const createAddress = async (
   // If new address is default,
   // remove default from existing addresses
   if (isDefault) {
-    await pool
-      .request()
-      .input("userId", sql.UniqueIdentifier, userId)
-      .query(`
+    await pool.execute(
+      `
         UPDATE addresses
         SET
           is_default = 0,
-          updated_at = SYSUTCDATETIME()
-        WHERE user_id = @userId
-      `);
+          updated_at = UTC_TIMESTAMP(6)
+        WHERE user_id = ?
+      `,
+      [userId]
+    );
   }
 
   // Generate ID in JavaScript
-  const addressId = crypto.randomUUID();
+  const addressId = randomUUID();
 
-  await pool
-    .request()
-    .input(
-      "addressId",
-      sql.UniqueIdentifier,
-      addressId
-    )
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("name", sql.NVarChar, name)
-    .input("phone", sql.NVarChar, phone)
-    .input("pincode", sql.NVarChar, pincode)
-    .input("address", sql.NVarChar, address)
-    .input("city", sql.NVarChar, city)
-    .input("state", sql.NVarChar, state)
-    .input("addressType", sql.NVarChar, addressType)
-    .input("isDefault", sql.Bit, isDefault)
-    .query(`
+  await pool.execute(
+    `
       INSERT INTO addresses
       (
         id,
@@ -141,30 +127,36 @@ const createAddress = async (
       )
       VALUES
       (
-        @addressId,
-        @userId,
-        @name,
-        @phone,
-        @pincode,
-        @address,
-        @city,
-        @state,
-        @addressType,
-        @isDefault,
-        SYSUTCDATETIME(),
-        SYSUTCDATETIME()
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        UTC_TIMESTAMP(6),
+        UTC_TIMESTAMP(6)
       )
-    `);
+    `,
+    [
+      addressId,
+      userId,
+      name,
+      phone,
+      pincode,
+      address,
+      city,
+      state,
+      addressType,
+      isDefault ? 1 : 0,
+    ]
+  );
 
-  const result = await pool
-    .request()
-    .input(
-      "addressId",
-      sql.UniqueIdentifier,
-      addressId
-    )
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         id,
         user_id,
@@ -180,11 +172,14 @@ const createAddress = async (
         updated_at
       FROM addresses
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+      LIMIT 1
+    `,
+    [addressId, userId]
+  );
 
-  return result.recordset[0];
+  return rows[0];
 };
 
 // ==========================================
@@ -208,72 +203,70 @@ const updateAddress = async (
   const pool = await poolPromise;
 
   // Check address belongs to user
-  const existingResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .query(`
-      SELECT TOP 1
-        id
+  const [existingRows] = await pool.execute(
+    `
+      SELECT id
       FROM addresses
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+      LIMIT 1
+    `,
+    [addressId, userId]
+  );
 
-  if (existingResult.recordset.length === 0) {
+  if (existingRows.length === 0) {
     throw new Error("Address not found.");
   }
 
   // If updated address becomes default,
   // remove default from other addresses
   if (isDefault === true) {
-    await pool
-      .request()
-      .input("userId", sql.UniqueIdentifier, userId)
-      .query(`
+    await pool.execute(
+      `
         UPDATE addresses
         SET
           is_default = 0,
-          updated_at = SYSUTCDATETIME()
-        WHERE user_id = @userId
-      `);
+          updated_at = UTC_TIMESTAMP(6)
+        WHERE user_id = ?
+      `,
+      [userId]
+    );
   }
 
-  await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .input("name", sql.NVarChar, name)
-    .input("phone", sql.NVarChar, phone)
-    .input("pincode", sql.NVarChar, pincode)
-    .input("address", sql.NVarChar, address)
-    .input("city", sql.NVarChar, city)
-    .input("state", sql.NVarChar, state)
-    .input("addressType", sql.NVarChar, addressType)
-    .input("isDefault", sql.Bit, isDefault)
-    .query(`
+  await pool.execute(
+    `
       UPDATE addresses
       SET
-        name = @name,
-        phone = @phone,
-        pincode = @pincode,
-        address = @address,
-        city = @city,
-        state = @state,
-        address_type = @addressType,
-        is_default = @isDefault,
-        updated_at = SYSUTCDATETIME()
+        name = ?,
+        phone = ?,
+        pincode = ?,
+        address = ?,
+        city = ?,
+        state = ?,
+        address_type = ?,
+        is_default = ?,
+        updated_at = UTC_TIMESTAMP(6)
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+    `,
+    [
+      name,
+      phone,
+      pincode,
+      address,
+      city,
+      state,
+      addressType,
+      isDefault ? 1 : 0,
+      addressId,
+      userId,
+    ]
+  );
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         id,
         user_id,
@@ -289,11 +282,14 @@ const updateAddress = async (
         updated_at
       FROM addresses
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+      LIMIT 1
+    `,
+    [addressId, userId]
+  );
 
-  return result.recordset[0];
+  return rows[0];
 };
 
 // ==========================================
@@ -304,33 +300,31 @@ const deleteAddress = async (userId, addressId) => {
   const pool = await poolPromise;
 
   // Check address belongs to user
-  const existingResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .query(`
-      SELECT TOP 1
-        id
+  const [existingRows] = await pool.execute(
+    `
+      SELECT id
       FROM addresses
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+      LIMIT 1
+    `,
+    [addressId, userId]
+  );
 
-  if (existingResult.recordset.length === 0) {
+  if (existingRows.length === 0) {
     throw new Error("Address not found.");
   }
 
-  await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .query(`
+  await pool.execute(
+    `
       DELETE FROM addresses
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+    `,
+    [addressId, userId]
+  );
 
   return {
     id: addressId,
@@ -349,55 +343,50 @@ const setDefaultAddress = async (
   const pool = await poolPromise;
 
   // Check address belongs to user
-  const existingResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .query(`
-      SELECT TOP 1
-        id
+  const [existingRows] = await pool.execute(
+    `
+      SELECT id
       FROM addresses
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+      LIMIT 1
+    `,
+    [addressId, userId]
+  );
 
-  if (existingResult.recordset.length === 0) {
+  if (existingRows.length === 0) {
     throw new Error("Address not found.");
   }
 
   // Remove default from all user's addresses
-  await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  await pool.execute(
+    `
       UPDATE addresses
       SET
         is_default = 0,
-        updated_at = SYSUTCDATETIME()
-      WHERE user_id = @userId
-    `);
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE user_id = ?
+    `,
+    [userId]
+  );
 
   // Set selected address as default
-  await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .query(`
+  await pool.execute(
+    `
       UPDATE addresses
       SET
         is_default = 1,
-        updated_at = SYSUTCDATETIME()
+        updated_at = UTC_TIMESTAMP(6)
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+    `,
+    [addressId, userId]
+  );
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("addressId", sql.UniqueIdentifier, addressId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         id,
         user_id,
@@ -413,11 +402,14 @@ const setDefaultAddress = async (
         updated_at
       FROM addresses
       WHERE
-        id = @addressId
-        AND user_id = @userId
-    `);
+        id = ?
+        AND user_id = ?
+      LIMIT 1
+    `,
+    [addressId, userId]
+  );
 
-  return result.recordset[0];
+  return rows[0];
 };
 
 // ==========================================

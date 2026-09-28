@@ -1,4 +1,5 @@
-const { sql, poolPromise } = require("../config/sql");
+const { poolPromise } = require("../config/sql");
+const { randomUUID } = require("crypto");
 
 const {
   uploadProductImages,
@@ -19,145 +20,11 @@ const getAllProducts = async ({
 
   const offset = (page - 1) * limit;
 
-  const request = pool.request();
+  const searchValue = search || null;
+  const categoryValue = category || null;
 
-  request.input("offset", sql.Int, offset);
-  request.input("limit", sql.Int, limit);
-  request.input("search", sql.NVarChar(200), search || null);
-  request.input("category", sql.NVarChar(100), category || null);
-
-  const result = await request.query(`
-    SELECT
-      id,
-      slug,
-      name,
-      category_slug,
-      category_label,
-      fit,
-      fabric,
-      coverage,
-      price,
-      mrp,
-      best_price,
-      rating,
-      review_count,
-      description,
-      fabric_details,
-      wash_care,
-      tags,
-      best_seller,
-      new_arrival,
-      trending,
-      limited_edition,
-      inventory,
-      created_at,
-      updated_at
-    FROM dbo.products
-    WHERE
-      (
-        @search IS NULL
-        OR name LIKE '%' + @search + '%'
-        OR tags LIKE '%' + @search + '%'
-      )
-      AND
-      (
-        @category IS NULL
-        OR category_slug = @category
-      )
-    ORDER BY created_at DESC
-    OFFSET @offset ROWS
-    FETCH NEXT @limit ROWS ONLY;
-
-    SELECT COUNT(*) AS total
-    FROM dbo.products
-    WHERE
-      (
-        @search IS NULL
-        OR name LIKE '%' + @search + '%'
-        OR tags LIKE '%' + @search + '%'
-      )
-      AND
-      (
-        @category IS NULL
-        OR category_slug = @category
-      );
-  `);
-
-  const products = result.recordsets[0];
-  const total = result.recordsets[1][0].total;
-
-  // ==========================================
-  // ADD IMAGES + VARIANTS
-  // ==========================================
-
-  for (const product of products) {
-
-    // ------------------------------------------
-    // GET IMAGES
-    // ------------------------------------------
-
-    const imageResult = await pool
-      .request()
-      .input("productId", sql.NVarChar(100), product.id)
-      .query(`
-        SELECT
-          id,
-          image_url,
-          sort_order,
-          is_primary,
-          created_at
-        FROM dbo.product_images
-        WHERE product_id = @productId
-        ORDER BY sort_order ASC;
-      `);
-
-    product.images = imageResult.recordset;
-
-    // ------------------------------------------
-    // GET VARIANTS
-    // ------------------------------------------
-
-    const variantResult = await pool
-      .request()
-      .input("productId", sql.NVarChar(100), product.id)
-      .query(`
-        SELECT
-          id,
-          product_id,
-          size,
-          color,
-          inventory,
-          sku,
-          created_at,
-          updated_at
-        FROM dbo.product_variants
-        WHERE product_id = @productId
-        ORDER BY created_at ASC;
-      `);
-
-    product.variants = variantResult.recordset;
-  }
-
-  return {
-    products,
-    total,
-    page,
-    limit,
-    totalPages: Math.ceil(total / limit),
-  };
-};
-
-// ==========================================
-// GET SINGLE PRODUCT BY SLUG
-// ==========================================
-
-const getProductBySlug = async (slug) => {
-  const pool = await poolPromise;
-
-  const result = await pool
-    .request()
-    .input("slug", sql.NVarChar(200), slug)
-    .query(`
+  const [productRows] = await pool.execute(
+    `
       SELECT
         id,
         slug,
@@ -183,45 +50,194 @@ const getProductBySlug = async (slug) => {
         inventory,
         created_at,
         updated_at
-      FROM dbo.products
-      WHERE slug = @slug;
-    `);
+      FROM products
+      WHERE
+        (
+          ? IS NULL
+          OR name LIKE CONCAT('%', ?, '%')
+          OR tags LIKE CONCAT('%', ?, '%')
+        )
+        AND
+        (
+          ? IS NULL
+          OR category_slug = ?
+        )
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `,
+    [
+      searchValue,
+      searchValue,
+      searchValue,
+      categoryValue,
+      categoryValue,
+      Number(limit),
+      Number(offset),
+    ]
+  );
 
-  if (result.recordset.length === 0) {
+  const [countRows] = await pool.execute(
+    `
+      SELECT COUNT(*) AS total
+      FROM products
+      WHERE
+        (
+          ? IS NULL
+          OR name LIKE CONCAT('%', ?, '%')
+          OR tags LIKE CONCAT('%', ?, '%')
+        )
+        AND
+        (
+          ? IS NULL
+          OR category_slug = ?
+        )
+    `,
+    [
+      searchValue,
+      searchValue,
+      searchValue,
+      categoryValue,
+      categoryValue,
+    ]
+  );
+
+  const products = productRows;
+  const total = Number(countRows[0].total);
+
+  // ==========================================
+  // ADD IMAGES + VARIANTS
+  // ==========================================
+
+  for (const product of products) {
+    // ------------------------------------------
+    // GET IMAGES
+    // ------------------------------------------
+
+    const [imageRows] = await pool.execute(
+      `
+        SELECT
+          id,
+          image_url,
+          sort_order,
+          is_primary,
+          created_at
+        FROM product_images
+        WHERE product_id = ?
+        ORDER BY sort_order ASC
+      `,
+      [product.id]
+    );
+
+    product.images = imageRows;
+
+    // ------------------------------------------
+    // GET VARIANTS
+    // ------------------------------------------
+
+    const [variantRows] = await pool.execute(
+      `
+        SELECT
+          id,
+          product_id,
+          size,
+          color,
+          inventory,
+          sku,
+          created_at,
+          updated_at
+        FROM product_variants
+        WHERE product_id = ?
+        ORDER BY created_at ASC
+      `,
+      [product.id]
+    );
+
+    product.variants = variantRows;
+  }
+
+  return {
+    products,
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit),
+  };
+};
+
+// ==========================================
+// GET SINGLE PRODUCT BY SLUG
+// ==========================================
+
+const getProductBySlug = async (slug) => {
+  const pool = await poolPromise;
+
+  const [rows] = await pool.execute(
+    `
+      SELECT
+        id,
+        slug,
+        name,
+        category_slug,
+        category_label,
+        fit,
+        fabric,
+        coverage,
+        price,
+        mrp,
+        best_price,
+        rating,
+        review_count,
+        description,
+        fabric_details,
+        wash_care,
+        tags,
+        best_seller,
+        new_arrival,
+        trending,
+        limited_edition,
+        inventory,
+        created_at,
+        updated_at
+      FROM products
+      WHERE slug = ?
+      LIMIT 1
+    `,
+    [slug]
+  );
+
+  if (rows.length === 0) {
     throw new Error("Product not found.");
   }
 
-  const product = result.recordset[0];
+  const product = rows[0];
 
   // ==========================================
   // GET PRODUCT IMAGES
   // ==========================================
 
-  const imageResult = await pool
-    .request()
-    .input("productId", sql.NVarChar(100), product.id)
-    .query(`
+  const [imageRows] = await pool.execute(
+    `
       SELECT
         id,
         image_url,
         sort_order,
         is_primary,
         created_at
-      FROM dbo.product_images
-      WHERE product_id = @productId
-      ORDER BY sort_order ASC;
-    `);
+      FROM product_images
+      WHERE product_id = ?
+      ORDER BY sort_order ASC
+    `,
+    [product.id]
+  );
 
-  product.images = imageResult.recordset;
+  product.images = imageRows;
 
   // ==========================================
   // GET PRODUCT VARIANTS
   // ==========================================
 
-  const variantResult = await pool
-    .request()
-    .input("productId", sql.NVarChar(100), product.id)
-    .query(`
+  const [variantRows] = await pool.execute(
+    `
       SELECT
         id,
         product_id,
@@ -231,12 +247,14 @@ const getProductBySlug = async (slug) => {
         sku,
         created_at,
         updated_at
-      FROM dbo.product_variants
-      WHERE product_id = @productId
-      ORDER BY created_at ASC;
-    `);
+      FROM product_variants
+      WHERE product_id = ?
+      ORDER BY created_at ASC
+    `,
+    [product.id]
+  );
 
-  product.variants = variantResult.recordset;
+  product.variants = variantRows;
 
   return product;
 };
@@ -303,17 +321,17 @@ const createProduct = async (product, files = []) => {
   // CHECK DUPLICATE PRODUCT
   // ==========================================
 
-  const existing = await pool
-    .request()
-    .input("id", sql.NVarChar(100), id)
-    .input("slug", sql.NVarChar(200), slug)
-    .query(`
+  const [existingRows] = await pool.execute(
+    `
       SELECT id
-      FROM dbo.products
-      WHERE id = @id OR slug = @slug;
-    `);
+      FROM products
+      WHERE id = ? OR slug = ?
+      LIMIT 1
+    `,
+    [id, slug]
+  );
 
-  if (existing.recordset.length > 0) {
+  if (existingRows.length > 0) {
     throw new Error("Product with this ID or slug already exists.");
   }
 
@@ -321,32 +339,9 @@ const createProduct = async (product, files = []) => {
   // CREATE PRODUCT
   // ==========================================
 
-  await pool
-    .request()
-    .input("id", sql.NVarChar(100), id)
-    .input("slug", sql.NVarChar(200), slug)
-    .input("name", sql.NVarChar(200), name)
-    .input("categorySlug", sql.NVarChar(100), category_slug || null)
-    .input("categoryLabel", sql.NVarChar(150), category_label)
-    .input("fit", sql.NVarChar(30), fit)
-    .input("fabric", sql.NVarChar(50), fabric)
-    .input("coverage", sql.NVarChar(30), coverage)
-    .input("price", sql.Decimal(18, 2), price)
-    .input("mrp", sql.Decimal(18, 2), mrp)
-    .input("bestPrice", sql.Decimal(18, 2), best_price)
-    .input("rating", sql.Decimal(3, 2), rating)
-    .input("reviewCount", sql.Int, review_count)
-    .input("description", sql.NVarChar(sql.MAX), description || null)
-    .input("fabricDetails", sql.NVarChar(sql.MAX), fabric_details || null)
-    .input("washCare", sql.NVarChar(sql.MAX), wash_care || null)
-    .input("tags", sql.NVarChar(sql.MAX), tags)
-    .input("bestSeller", sql.Bit, best_seller)
-    .input("newArrival", sql.Bit, new_arrival)
-    .input("trending", sql.Bit, trending)
-    .input("limitedEdition", sql.Bit, limited_edition)
-    .input("inventory", sql.Int, inventory)
-    .query(`
-      INSERT INTO dbo.products
+  await pool.execute(
+    `
+      INSERT INTO products
       (
         id,
         slug,
@@ -375,32 +370,57 @@ const createProduct = async (product, files = []) => {
       )
       VALUES
       (
-        @id,
-        @slug,
-        @name,
-        @categorySlug,
-        @categoryLabel,
-        @fit,
-        @fabric,
-        @coverage,
-        @price,
-        @mrp,
-        @bestPrice,
-        @rating,
-        @reviewCount,
-        @description,
-        @fabricDetails,
-        @washCare,
-        @tags,
-        @bestSeller,
-        @newArrival,
-        @trending,
-        @limitedEdition,
-        @inventory,
-        SYSUTCDATETIME(),
-        SYSUTCDATETIME()
-      );
-    `);
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        UTC_TIMESTAMP(6),
+        UTC_TIMESTAMP(6)
+      )
+    `,
+    [
+      id,
+      slug,
+      name,
+      category_slug || null,
+      category_label,
+      fit,
+      fabric,
+      coverage,
+      price,
+      mrp,
+      best_price,
+      rating,
+      review_count,
+      description || null,
+      fabric_details || null,
+      wash_care || null,
+      tags,
+      best_seller ? 1 : 0,
+      new_arrival ? 1 : 0,
+      trending ? 1 : 0,
+      limited_edition ? 1 : 0,
+      inventory,
+    ]
+  );
 
   // ==========================================
   // UPLOAD PRODUCT IMAGES
@@ -412,14 +432,9 @@ const createProduct = async (product, files = []) => {
     for (let i = 0; i < uploadedImages.length; i++) {
       const image = uploadedImages[i];
 
-      await pool
-        .request()
-        .input("productId", sql.NVarChar(100), id)
-        .input("imageUrl", sql.NVarChar(2048), image.url)
-        .input("sortOrder", sql.Int, i)
-        .input("isPrimary", sql.Bit, i === 0)
-        .query(`
-          INSERT INTO dbo.product_images
+      await pool.execute(
+        `
+          INSERT INTO product_images
           (
             id,
             product_id,
@@ -430,14 +445,22 @@ const createProduct = async (product, files = []) => {
           )
           VALUES
           (
-            NEWID(),
-            @productId,
-            @imageUrl,
-            @sortOrder,
-            @isPrimary,
-            SYSUTCDATETIME()
-          );
-        `);
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            UTC_TIMESTAMP(6)
+          )
+        `,
+        [
+          randomUUID(),
+          id,
+          image.url,
+          i,
+          i === 0 ? 1 : 0,
+        ]
+      );
     }
   }
 
@@ -446,7 +469,6 @@ const createProduct = async (product, files = []) => {
   // ==========================================
 
   for (const variant of parsedVariants) {
-
     if (
       !variant.size ||
       !variant.color ||
@@ -457,23 +479,9 @@ const createProduct = async (product, files = []) => {
       );
     }
 
-    await pool
-      .request()
-      .input("productId", sql.NVarChar(100), id)
-      .input("size", sql.NVarChar(10), variant.size)
-      .input("color", sql.NVarChar(30), variant.color)
-      .input(
-        "inventory",
-        sql.Int,
-        Number(variant.inventory)
-      )
-      .input(
-        "sku",
-        sql.NVarChar(100),
-        variant.sku || null
-      )
-      .query(`
-        INSERT INTO dbo.product_variants
+    await pool.execute(
+      `
+        INSERT INTO product_variants
         (
           id,
           product_id,
@@ -486,16 +494,25 @@ const createProduct = async (product, files = []) => {
         )
         VALUES
         (
-          NEWID(),
-          @productId,
-          @size,
-          @color,
-          @inventory,
-          @sku,
-          SYSUTCDATETIME(),
-          SYSUTCDATETIME()
-        );
-      `);
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          ?,
+          UTC_TIMESTAMP(6),
+          UTC_TIMESTAMP(6)
+        )
+      `,
+      [
+        randomUUID(),
+        id,
+        variant.size,
+        variant.color,
+        Number(variant.inventory),
+        variant.sku || null,
+      ]
+    );
   }
 
   return getProductBySlug(slug);
@@ -558,16 +575,17 @@ const updateProduct = async (id, product, files = []) => {
   // CHECK PRODUCT
   // ==========================================
 
-  const existing = await pool
-    .request()
-    .input("id", sql.NVarChar(100), id)
-    .query(`
+  const [existingRows] = await pool.execute(
+    `
       SELECT id
-      FROM dbo.products
-      WHERE id = @id;
-    `);
+      FROM products
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [id]
+  );
 
-  if (existing.recordset.length === 0) {
+  if (existingRows.length === 0) {
     throw new Error("Product not found.");
   }
 
@@ -575,57 +593,59 @@ const updateProduct = async (id, product, files = []) => {
   // UPDATE PRODUCT DETAILS
   // ==========================================
 
-  await pool
-    .request()
-    .input("id", sql.NVarChar(100), id)
-    .input("slug", sql.NVarChar(200), slug)
-    .input("name", sql.NVarChar(200), name)
-    .input("categorySlug", sql.NVarChar(100), category_slug || null)
-    .input("categoryLabel", sql.NVarChar(150), category_label)
-    .input("fit", sql.NVarChar(30), fit)
-    .input("fabric", sql.NVarChar(50), fabric)
-    .input("coverage", sql.NVarChar(30), coverage)
-    .input("price", sql.Decimal(18, 2), price)
-    .input("mrp", sql.Decimal(18, 2), mrp)
-    .input("bestPrice", sql.Decimal(18, 2), best_price)
-    .input("rating", sql.Decimal(3, 2), rating)
-    .input("reviewCount", sql.Int, review_count)
-    .input("description", sql.NVarChar(sql.MAX), description || null)
-    .input("fabricDetails", sql.NVarChar(sql.MAX), fabric_details || null)
-    .input("washCare", sql.NVarChar(sql.MAX), wash_care || null)
-    .input("tags", sql.NVarChar(sql.MAX), tags)
-    .input("bestSeller", sql.Bit, best_seller)
-    .input("newArrival", sql.Bit, new_arrival)
-    .input("trending", sql.Bit, trending)
-    .input("limitedEdition", sql.Bit, limited_edition)
-    .input("inventory", sql.Int, inventory)
-    .query(`
-      UPDATE dbo.products
+  await pool.execute(
+    `
+      UPDATE products
       SET
-        slug = @slug,
-        name = @name,
-        category_slug = @categorySlug,
-        category_label = @categoryLabel,
-        fit = @fit,
-        fabric = @fabric,
-        coverage = @coverage,
-        price = @price,
-        mrp = @mrp,
-        best_price = @bestPrice,
-        rating = @rating,
-        review_count = @reviewCount,
-        description = @description,
-        fabric_details = @fabricDetails,
-        wash_care = @washCare,
-        tags = @tags,
-        best_seller = @bestSeller,
-        new_arrival = @newArrival,
-        trending = @trending,
-        limited_edition = @limitedEdition,
-        inventory = @inventory,
-        updated_at = SYSUTCDATETIME()
-      WHERE id = @id;
-    `);
+        slug = ?,
+        name = ?,
+        category_slug = ?,
+        category_label = ?,
+        fit = ?,
+        fabric = ?,
+        coverage = ?,
+        price = ?,
+        mrp = ?,
+        best_price = ?,
+        rating = ?,
+        review_count = ?,
+        description = ?,
+        fabric_details = ?,
+        wash_care = ?,
+        tags = ?,
+        best_seller = ?,
+        new_arrival = ?,
+        trending = ?,
+        limited_edition = ?,
+        inventory = ?,
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
+    `,
+    [
+      slug,
+      name,
+      category_slug || null,
+      category_label,
+      fit,
+      fabric,
+      coverage,
+      price,
+      mrp,
+      best_price,
+      rating,
+      review_count,
+      description || null,
+      fabric_details || null,
+      wash_care || null,
+      tags,
+      best_seller ? 1 : 0,
+      new_arrival ? 1 : 0,
+      trending ? 1 : 0,
+      limited_edition ? 1 : 0,
+      inventory,
+      id,
+    ]
+  );
 
   // ==========================================
   // UPDATE IMAGES
@@ -633,21 +653,20 @@ const updateProduct = async (id, product, files = []) => {
   // ==========================================
 
   if (files.length > 0) {
-
-    const oldImages = await pool
-      .request()
-      .input("productId", sql.NVarChar(100), id)
-      .query(`
+    const [oldImages] = await pool.execute(
+      `
         SELECT image_url
-        FROM dbo.product_images
-        WHERE product_id = @productId;
-      `);
+        FROM product_images
+        WHERE product_id = ?
+      `,
+      [id]
+    );
 
     // ------------------------------------------
     // DELETE OLD CLOUDINARY IMAGES
     // ------------------------------------------
 
-    for (const image of oldImages.recordset) {
+    for (const image of oldImages) {
       try {
         const url = image.image_url;
 
@@ -677,13 +696,13 @@ const updateProduct = async (id, product, files = []) => {
     // DELETE OLD IMAGE RECORDS
     // ------------------------------------------
 
-    await pool
-      .request()
-      .input("productId", sql.NVarChar(100), id)
-      .query(`
-        DELETE FROM dbo.product_images
-        WHERE product_id = @productId;
-      `);
+    await pool.execute(
+      `
+        DELETE FROM product_images
+        WHERE product_id = ?
+      `,
+      [id]
+    );
 
     // ------------------------------------------
     // UPLOAD NEW IMAGES
@@ -694,14 +713,9 @@ const updateProduct = async (id, product, files = []) => {
     for (let i = 0; i < uploadedImages.length; i++) {
       const image = uploadedImages[i];
 
-      await pool
-        .request()
-        .input("productId", sql.NVarChar(100), id)
-        .input("imageUrl", sql.NVarChar(2048), image.url)
-        .input("sortOrder", sql.Int, i)
-        .input("isPrimary", sql.Bit, i === 0)
-        .query(`
-          INSERT INTO dbo.product_images
+      await pool.execute(
+        `
+          INSERT INTO product_images
           (
             id,
             product_id,
@@ -712,14 +726,22 @@ const updateProduct = async (id, product, files = []) => {
           )
           VALUES
           (
-            NEWID(),
-            @productId,
-            @imageUrl,
-            @sortOrder,
-            @isPrimary,
-            SYSUTCDATETIME()
-          );
-        `);
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            UTC_TIMESTAMP(6)
+          )
+        `,
+        [
+          randomUUID(),
+          id,
+          image.url,
+          i,
+          i === 0 ? 1 : 0,
+        ]
+      );
     }
   }
 
@@ -729,25 +751,23 @@ const updateProduct = async (id, product, files = []) => {
   // ==========================================
 
   if (parsedVariants !== null) {
-
     // ------------------------------------------
     // DELETE OLD VARIANTS
     // ------------------------------------------
 
-    await pool
-      .request()
-      .input("productId", sql.NVarChar(100), id)
-      .query(`
-        DELETE FROM dbo.product_variants
-        WHERE product_id = @productId;
-      `);
+    await pool.execute(
+      `
+        DELETE FROM product_variants
+        WHERE product_id = ?
+      `,
+      [id]
+    );
 
     // ------------------------------------------
     // CREATE NEW VARIANTS
     // ------------------------------------------
 
     for (const variant of parsedVariants) {
-
       if (
         !variant.size ||
         !variant.color ||
@@ -758,23 +778,9 @@ const updateProduct = async (id, product, files = []) => {
         );
       }
 
-      await pool
-        .request()
-        .input("productId", sql.NVarChar(100), id)
-        .input("size", sql.NVarChar(10), variant.size)
-        .input("color", sql.NVarChar(30), variant.color)
-        .input(
-          "inventory",
-          sql.Int,
-          Number(variant.inventory)
-        )
-        .input(
-          "sku",
-          sql.NVarChar(100),
-          variant.sku || null
-        )
-        .query(`
-          INSERT INTO dbo.product_variants
+      await pool.execute(
+        `
+          INSERT INTO product_variants
           (
             id,
             product_id,
@@ -787,16 +793,25 @@ const updateProduct = async (id, product, files = []) => {
           )
           VALUES
           (
-            NEWID(),
-            @productId,
-            @size,
-            @color,
-            @inventory,
-            @sku,
-            SYSUTCDATETIME(),
-            SYSUTCDATETIME()
-          );
-        `);
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            UTC_TIMESTAMP(6),
+            UTC_TIMESTAMP(6)
+          )
+        `,
+        [
+          randomUUID(),
+          id,
+          variant.size,
+          variant.color,
+          Number(variant.inventory),
+          variant.sku || null,
+        ]
+      );
     }
   }
 
@@ -814,16 +829,17 @@ const deleteProduct = async (id) => {
   // CHECK PRODUCT
   // ==========================================
 
-  const result = await pool
-    .request()
-    .input("id", sql.NVarChar(100), id)
-    .query(`
+  const [productRows] = await pool.execute(
+    `
       SELECT id
-      FROM dbo.products
-      WHERE id = @id;
-    `);
+      FROM products
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [id]
+  );
 
-  if (result.recordset.length === 0) {
+  if (productRows.length === 0) {
     throw new Error("Product not found.");
   }
 
@@ -831,18 +847,19 @@ const deleteProduct = async (id) => {
   // CHECK IF VARIANTS ARE USED IN ORDERS
   // ==========================================
 
-  const orderVariantResult = await pool
-    .request()
-    .input("productId", sql.NVarChar(100), id)
-    .query(`
-      SELECT TOP 1 pv.id
-      FROM dbo.product_variants pv
-      INNER JOIN dbo.order_items oi
+  const [orderVariantRows] = await pool.execute(
+    `
+      SELECT pv.id
+      FROM product_variants pv
+      INNER JOIN order_items oi
         ON oi.variant_id = pv.id
-      WHERE pv.product_id = @productId;
-    `);
+      WHERE pv.product_id = ?
+      LIMIT 1
+    `,
+    [id]
+  );
 
-  if (orderVariantResult.recordset.length > 0) {
+  if (orderVariantRows.length > 0) {
     throw new Error(
       "This product cannot be deleted because one or more of its variants are already used in an order."
     );
@@ -852,20 +869,20 @@ const deleteProduct = async (id) => {
   // GET PRODUCT IMAGES
   // ==========================================
 
-  const imageResult = await pool
-    .request()
-    .input("productId", sql.NVarChar(100), id)
-    .query(`
+  const [imageRows] = await pool.execute(
+    `
       SELECT image_url
-      FROM dbo.product_images
-      WHERE product_id = @productId;
-    `);
+      FROM product_images
+      WHERE product_id = ?
+    `,
+    [id]
+  );
 
   // ==========================================
   // DELETE IMAGES FROM CLOUDINARY
   // ==========================================
 
-  for (const image of imageResult.recordset) {
+  for (const image of imageRows) {
     try {
       const url = image.image_url;
 
@@ -895,37 +912,37 @@ const deleteProduct = async (id) => {
   // DELETE VARIANTS
   // ==========================================
 
-  await pool
-    .request()
-    .input("productId", sql.NVarChar(100), id)
-    .query(`
-      DELETE FROM dbo.product_variants
-      WHERE product_id = @productId;
-    `);
+  await pool.execute(
+    `
+      DELETE FROM product_variants
+      WHERE product_id = ?
+    `,
+    [id]
+  );
 
   // ==========================================
   // DELETE IMAGE RECORDS
   // ==========================================
 
-  await pool
-    .request()
-    .input("productId", sql.NVarChar(100), id)
-    .query(`
-      DELETE FROM dbo.product_images
-      WHERE product_id = @productId;
-    `);
+  await pool.execute(
+    `
+      DELETE FROM product_images
+      WHERE product_id = ?
+    `,
+    [id]
+  );
 
   // ==========================================
   // DELETE PRODUCT
   // ==========================================
 
-  await pool
-    .request()
-    .input("id", sql.NVarChar(100), id)
-    .query(`
-      DELETE FROM dbo.products
-      WHERE id = @id;
-    `);
+  await pool.execute(
+    `
+      DELETE FROM products
+      WHERE id = ?
+    `,
+    [id]
+  );
 
   return true;
 };

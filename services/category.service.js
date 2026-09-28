@@ -1,49 +1,65 @@
-const { sql, poolPromise } = require("../config/sql");
+const { poolPromise } = require("../config/sql");
 
+// ==========================================
 // GET ALL CATEGORIES
+// ==========================================
+
 const getAllCategories = async () => {
   const pool = await poolPromise;
 
-  const result = await pool.request().query(`
-    SELECT
-      slug,
-      name,
-      description,
-      created_at
-    FROM dbo.categories
-    ORDER BY created_at DESC
-  `);
-
-  return result.recordset;
-};
-
-// GET SINGLE CATEGORY BY SLUG
-const getCategoryBySlug = async (slug) => {
-  const pool = await poolPromise;
-
-  const result = await pool
-    .request()
-    .input("slug", sql.NVarChar(100), slug)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         slug,
         name,
         description,
         created_at
-      FROM dbo.categories
-      WHERE slug = @slug
-    `);
+      FROM categories
+      ORDER BY created_at DESC
+    `
+  );
 
-  if (result.recordset.length === 0) {
+  return rows;
+};
+
+// ==========================================
+// GET SINGLE CATEGORY BY SLUG
+// ==========================================
+
+const getCategoryBySlug = async (slug) => {
+  const pool = await poolPromise;
+
+  const [rows] = await pool.execute(
+    `
+      SELECT
+        slug,
+        name,
+        description,
+        created_at
+      FROM categories
+      WHERE slug = ?
+      LIMIT 1
+    `,
+    [slug]
+  );
+
+  if (rows.length === 0) {
     throw new Error("Category not found.");
   }
 
-  return result.recordset[0];
+  return rows[0];
 };
 
+// ==========================================
 // CREATE CATEGORY
+// ==========================================
+
 const createCategory = async (category) => {
-  const { slug, name, description } = category;
+  const {
+    slug,
+    name,
+    description,
+  } = category;
 
   if (!slug || !name) {
     throw new Error("slug and name are required.");
@@ -51,27 +67,33 @@ const createCategory = async (category) => {
 
   const pool = await poolPromise;
 
-  // Check duplicate slug
-  const existing = await pool
-    .request()
-    .input("slug", sql.NVarChar(100), slug)
-    .query(`
-      SELECT slug
-      FROM dbo.categories
-      WHERE slug = @slug
-    `);
+  // ==========================================
+  // CHECK DUPLICATE SLUG
+  // ==========================================
 
-  if (existing.recordset.length > 0) {
-    throw new Error("Category with this slug already exists.");
+  const [existingRows] = await pool.execute(
+    `
+      SELECT slug
+      FROM categories
+      WHERE slug = ?
+      LIMIT 1
+    `,
+    [slug]
+  );
+
+  if (existingRows.length > 0) {
+    throw new Error(
+      "Category with this slug already exists."
+    );
   }
 
-  await pool
-    .request()
-    .input("slug", sql.NVarChar(100), slug)
-    .input("name", sql.NVarChar(150), name)
-    .input("description", sql.NVarChar(sql.MAX), description || null)
-    .query(`
-      INSERT INTO dbo.categories
+  // ==========================================
+  // CREATE CATEGORY
+  // ==========================================
+
+  await pool.execute(
+    `
+      INSERT INTO categories
       (
         slug,
         name,
@@ -80,19 +102,31 @@ const createCategory = async (category) => {
       )
       VALUES
       (
-        @slug,
-        @name,
-        @description,
-        SYSUTCDATETIME()
+        ?,
+        ?,
+        ?,
+        UTC_TIMESTAMP(6)
       )
-    `);
+    `,
+    [
+      slug,
+      name,
+      description || null,
+    ]
+  );
 
   return getCategoryBySlug(slug);
 };
 
+// ==========================================
 // UPDATE CATEGORY
+// ==========================================
+
 const updateCategory = async (slug, category) => {
-  const { name, description } = category;
+  const {
+    name,
+    description,
+  } = category;
 
   if (!name) {
     throw new Error("name is required.");
@@ -100,80 +134,108 @@ const updateCategory = async (slug, category) => {
 
   const pool = await poolPromise;
 
-  // Check category exists
-  const existing = await pool
-    .request()
-    .input("slug", sql.NVarChar(100), slug)
-    .query(`
-      SELECT slug
-      FROM dbo.categories
-      WHERE slug = @slug
-    `);
+  // ==========================================
+  // CHECK CATEGORY EXISTS
+  // ==========================================
 
-  if (existing.recordset.length === 0) {
+  const [existingRows] = await pool.execute(
+    `
+      SELECT slug
+      FROM categories
+      WHERE slug = ?
+      LIMIT 1
+    `,
+    [slug]
+  );
+
+  if (existingRows.length === 0) {
     throw new Error("Category not found.");
   }
 
-  await pool
-    .request()
-    .input("slug", sql.NVarChar(100), slug)
-    .input("name", sql.NVarChar(150), name)
-    .input("description", sql.NVarChar(sql.MAX), description || null)
-    .query(`
-      UPDATE dbo.categories
+  // ==========================================
+  // UPDATE CATEGORY
+  // ==========================================
+
+  await pool.execute(
+    `
+      UPDATE categories
       SET
-        name = @name,
-        description = @description
-      WHERE slug = @slug
-    `);
+        name = ?,
+        description = ?
+      WHERE slug = ?
+    `,
+    [
+      name,
+      description || null,
+      slug,
+    ]
+  );
 
   return getCategoryBySlug(slug);
 };
 
+// ==========================================
 // DELETE CATEGORY
+// ==========================================
+
 const deleteCategory = async (slug) => {
   const pool = await poolPromise;
 
-  // Check category exists
-  const existing = await pool
-    .request()
-    .input("slug", sql.NVarChar(100), slug)
-    .query(`
-      SELECT slug
-      FROM dbo.categories
-      WHERE slug = @slug
-    `);
+  // ==========================================
+  // CHECK CATEGORY EXISTS
+  // ==========================================
 
-  if (existing.recordset.length === 0) {
+  const [existingRows] = await pool.execute(
+    `
+      SELECT slug
+      FROM categories
+      WHERE slug = ?
+      LIMIT 1
+    `,
+    [slug]
+  );
+
+  if (existingRows.length === 0) {
     throw new Error("Category not found.");
   }
 
-  // Check if products are using this category
-  const products = await pool
-    .request()
-    .input("slug", sql.NVarChar(100), slug)
-    .query(`
-      SELECT COUNT(*) AS product_count
-      FROM dbo.products
-      WHERE category_slug = @slug
-    `);
+  // ==========================================
+  // CHECK IF PRODUCTS ARE USING THIS CATEGORY
+  // ==========================================
 
-  if (products.recordset[0].product_count > 0) {
+  const [productRows] = await pool.execute(
+    `
+      SELECT COUNT(*) AS product_count
+      FROM products
+      WHERE category_slug = ?
+    `,
+    [slug]
+  );
+
+  if (Number(productRows[0].product_count) > 0) {
     throw new Error(
       "Cannot delete category because products are using this category."
     );
   }
 
-  await pool
-    .request()
-    .input("slug", sql.NVarChar(100), slug)
-    .query(`
-      DELETE FROM dbo.categories
-      WHERE slug = @slug
-    `);
+  // ==========================================
+  // DELETE CATEGORY
+  // ==========================================
+
+  await pool.execute(
+    `
+      DELETE FROM categories
+      WHERE slug = ?
+    `,
+    [slug]
+  );
 
   return true;
 };
+
+// ==========================================
+// EXPORTS
+// ==========================================
 
 module.exports = {
   getAllCategories,

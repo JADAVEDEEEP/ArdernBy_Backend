@@ -1,4 +1,5 @@
-const { sql, poolPromise } = require("../config/sql");
+const { poolPromise } = require("../config/sql");
+const crypto = require("crypto");
 
 // ==========================================
 // GET ALL SUBSCRIPTION PLANS
@@ -7,9 +8,8 @@ const { sql, poolPromise } = require("../config/sql");
 const getPlans = async () => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         p.id,
         p.name,
@@ -37,11 +37,12 @@ const getPlans = async () => {
       WHERE p.active = 1
 
       ORDER BY p.price ASC, b.created_at ASC
-    `);
+    `
+  );
 
   const plans = {};
 
-  for (const row of result.recordset) {
+  for (const row of rows) {
     if (!plans[row.id]) {
       plans[row.id] = {
         id: row.id,
@@ -79,10 +80,8 @@ const getPlans = async () => {
 const getPlanById = async (planId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("planId", sql.UniqueIdentifier, planId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         p.id,
         p.name,
@@ -107,16 +106,18 @@ const getPlanById = async (planId) => {
         ON p.id = b.plan_id
         AND b.active = 1
 
-      WHERE p.id = @planId
+      WHERE p.id = ?
 
       ORDER BY b.created_at ASC
-    `);
+    `,
+    [planId]
+  );
 
-  if (result.recordset.length === 0) {
+  if (rows.length === 0) {
     throw new Error("Subscription plan not found.");
   }
 
-  const first = result.recordset[0];
+  const first = rows[0];
 
   const plan = {
     id: first.id,
@@ -133,7 +134,7 @@ const getPlanById = async (planId) => {
     benefits: [],
   };
 
-  for (const row of result.recordset) {
+  for (const row of rows) {
     if (row.benefit_id) {
       plan.benefits.push({
         id: row.benefit_id,
@@ -154,11 +155,9 @@ const getPlanById = async (planId) => {
 const getUserSubscription = async (userId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
-      SELECT TOP 1
+  const [rows] = await pool.execute(
+    `
+      SELECT
         s.id,
         s.user_id,
         s.plan_id,
@@ -192,16 +191,18 @@ const getUserSubscription = async (userId) => {
         ON p.id = b.plan_id
         AND b.active = 1
 
-      WHERE s.user_id = @userId
+      WHERE s.user_id = ?
 
       ORDER BY s.created_at DESC, b.created_at ASC
-    `);
+    `,
+    [userId]
+  );
 
-  if (result.recordset.length === 0) {
+  if (rows.length === 0) {
     return null;
   }
 
-  const first = result.recordset[0];
+  const first = rows[0];
 
   const subscription = {
     id: first.id,
@@ -227,7 +228,7 @@ const getUserSubscription = async (userId) => {
     },
   };
 
-  for (const row of result.recordset) {
+  for (const row of rows) {
     if (row.benefit_id) {
       subscription.plan.benefits.push({
         id: row.benefit_id,
@@ -252,12 +253,13 @@ const createSubscription = async ({
 }) => {
   const pool = await poolPromise;
 
-  // Check plan
-  const planResult = await pool
-    .request()
-    .input("planId", sql.UniqueIdentifier, planId)
-    .query(`
-      SELECT TOP 1
+  // ==========================================
+  // CHECK PLAN
+  // ==========================================
+
+  const [planRows] = await pool.execute(
+    `
+      SELECT
         id,
         name,
         slug,
@@ -268,46 +270,53 @@ const createSubscription = async ({
         free_delivery,
         discount_percent
       FROM subscription_plans
-      WHERE id = @planId
-    `);
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [planId]
+  );
 
-  if (planResult.recordset.length === 0) {
+  if (planRows.length === 0) {
     throw new Error("Subscription plan not found.");
   }
 
-  const plan = planResult.recordset[0];
+  const plan = planRows[0];
 
   if (!plan.active) {
     throw new Error("Subscription plan is inactive.");
   }
 
-  // Get active subscription
-  const activeResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
-      SELECT TOP 1
-        id
+  // ==========================================
+  // GET ACTIVE SUBSCRIPTION
+  // ==========================================
+
+  const [activeRows] = await pool.execute(
+    `
+      SELECT id
       FROM subscriptions
       WHERE
-        user_id = @userId
+        user_id = ?
         AND status = 'active'
-        AND end_date > SYSUTCDATETIME()
-    `);
+        AND end_date > UTC_TIMESTAMP()
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (activeResult.recordset.length > 0) {
+  if (activeRows.length > 0) {
     throw new Error(
       "You already have an active subscription."
     );
   }
 
-  // Create pending subscription
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("planId", sql.UniqueIdentifier, planId)
-    .input("paymentId", sql.NVarChar(100), paymentId)
-    .query(`
+  // ==========================================
+  // CREATE PENDING SUBSCRIPTION
+  // ==========================================
+
+  const subscriptionId = crypto.randomUUID();
+
+  await pool.execute(
+    `
       INSERT INTO subscriptions
       (
         id,
@@ -321,34 +330,50 @@ const createSubscription = async ({
         created_at,
         updated_at
       )
-      OUTPUT
-        INSERTED.id,
-        INSERTED.user_id,
-        INSERTED.plan_id,
-        INSERTED.status,
-        INSERTED.start_date,
-        INSERTED.end_date,
-        INSERTED.auto_renew,
-        INSERTED.payment_id,
-        INSERTED.created_at,
-        INSERTED.updated_at
       VALUES
       (
-        NEWID(),
-        @userId,
-        @planId,
+        ?,
+        ?,
+        ?,
         'pending',
         NULL,
         NULL,
         0,
-        @paymentId,
-        SYSUTCDATETIME(),
-        SYSUTCDATETIME()
+        ?,
+        UTC_TIMESTAMP(6),
+        UTC_TIMESTAMP(6)
       )
-    `);
+    `,
+    [
+      subscriptionId,
+      userId,
+      planId,
+      paymentId,
+    ]
+  );
+
+  const [subscriptionRows] = await pool.execute(
+    `
+      SELECT
+        id,
+        user_id,
+        plan_id,
+        status,
+        start_date,
+        end_date,
+        auto_renew,
+        payment_id,
+        created_at,
+        updated_at
+      FROM subscriptions
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [subscriptionId]
+  );
 
   return {
-    subscription: result.recordset[0],
+    subscription: subscriptionRows[0],
     plan,
   };
 };
@@ -363,31 +388,35 @@ const activateSubscription = async (
 ) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input(
-      "subscriptionId",
-      sql.UniqueIdentifier,
-      subscriptionId
-    )
-    .query(`
-      SELECT TOP 1
+  // ==========================================
+  // GET SUBSCRIPTION
+  // ==========================================
+
+  const [subscriptionRows] = await pool.execute(
+    `
+      SELECT
         s.id,
         s.user_id,
         s.plan_id,
         s.status,
         p.duration_days
       FROM subscriptions s
+
       INNER JOIN subscription_plans p
         ON s.plan_id = p.id
-      WHERE s.id = @subscriptionId
-    `);
 
-  if (result.recordset.length === 0) {
+      WHERE s.id = ?
+
+      LIMIT 1
+    `,
+    [subscriptionId]
+  );
+
+  if (subscriptionRows.length === 0) {
     throw new Error("Subscription not found.");
   }
 
-  const subscription = result.recordset[0];
+  const subscription = subscriptionRows[0];
 
   if (subscription.status !== "pending") {
     throw new Error(
@@ -395,28 +424,32 @@ const activateSubscription = async (
     );
   }
 
-  // Check if user already has active subscription
-  const activeResult = await pool
-    .request()
-    .input(
-      "userId",
-      sql.UniqueIdentifier,
-      subscription.user_id
-    )
-    .query(`
-      SELECT TOP 1 id
+  // ==========================================
+  // CHECK ACTIVE SUBSCRIPTION
+  // ==========================================
+
+  const [activeRows] = await pool.execute(
+    `
+      SELECT id
       FROM subscriptions
       WHERE
-        user_id = @userId
+        user_id = ?
         AND status = 'active'
-        AND end_date > SYSUTCDATETIME()
-    `);
+        AND end_date > UTC_TIMESTAMP()
+      LIMIT 1
+    `,
+    [subscription.user_id]
+  );
 
-  if (activeResult.recordset.length > 0) {
+  if (activeRows.length > 0) {
     throw new Error(
       "User already has an active subscription."
     );
   }
+
+  // ==========================================
+  // CALCULATE DATES
+  // ==========================================
 
   const startDate = new Date();
 
@@ -424,60 +457,61 @@ const activateSubscription = async (
 
   endDate.setDate(
     endDate.getDate() +
-      subscription.duration_days
+      Number(subscription.duration_days)
   );
 
-  const updateResult = await pool
-    .request()
-    .input(
-      "subscriptionId",
-      sql.UniqueIdentifier,
-      subscriptionId
-    )
-    .input(
-      "startDate",
-      sql.DateTime2,
-      startDate
-    )
-    .input(
-      "endDate",
-      sql.DateTime2,
-      endDate
-    )
-    .input(
-      "paymentId",
-      sql.NVarChar(100),
-      paymentId
-    )
-    .query(`
-      UPDATE subscriptions
+  // ==========================================
+  // UPDATE SUBSCRIPTION
+  // ==========================================
 
+  await pool.execute(
+    `
+      UPDATE subscriptions
       SET
         status = 'active',
-        start_date = @startDate,
-        end_date = @endDate,
+        start_date = ?,
+        end_date = ?,
+        payment_id = COALESCE(?, payment_id),
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
+    `,
+    [
+      startDate,
+      endDate,
+      paymentId,
+      subscriptionId,
+    ]
+  );
 
-        payment_id =
-          COALESCE(@paymentId, payment_id),
+  // ==========================================
+  // RETURN UPDATED SUBSCRIPTION
+  // ==========================================
 
-        updated_at = SYSUTCDATETIME()
+  const [rows] = await pool.execute(
+    `
+      SELECT
+        id,
+        user_id,
+        plan_id,
+        status,
+        start_date,
+        end_date,
+        auto_renew,
+        payment_id,
+        created_at,
+        updated_at
+      FROM subscriptions
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [subscriptionId]
+  );
 
-      OUTPUT
-        INSERTED.id,
-        INSERTED.user_id,
-        INSERTED.plan_id,
-        INSERTED.status,
-        INSERTED.start_date,
-        INSERTED.end_date,
-        INSERTED.auto_renew,
-        INSERTED.payment_id,
-        INSERTED.created_at,
-        INSERTED.updated_at
+  if (rows.length === 0) {
+    throw new Error("Subscription not found.");
+  }
 
-      WHERE id = @subscriptionId
-    `);
-
-  return updateResult.recordset[0];
+  return rows[0];
 };
 
 // ==========================================
@@ -490,49 +524,91 @@ const cancelSubscription = async (
 ) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input(
-      "userId",
-      sql.UniqueIdentifier,
-      userId
-    )
-    .input(
-      "subscriptionId",
-      sql.UniqueIdentifier,
-      subscriptionId
-    )
-    .query(`
-      UPDATE subscriptions
+  // ==========================================
+  // CHECK ACTIVE SUBSCRIPTION
+  // ==========================================
 
-      SET
-        status = 'cancelled',
-        auto_renew = 0,
-        updated_at = SYSUTCDATETIME()
-
-      OUTPUT
-        INSERTED.id,
-        INSERTED.user_id,
-        INSERTED.plan_id,
-        INSERTED.status,
-        INSERTED.start_date,
-        INSERTED.end_date,
-        INSERTED.auto_renew,
-        INSERTED.payment_id
-
+  const [existingRows] = await pool.execute(
+    `
+      SELECT
+        id,
+        user_id,
+        plan_id,
+        status,
+        start_date,
+        end_date,
+        auto_renew,
+        payment_id
+      FROM subscriptions
       WHERE
-        id = @subscriptionId
-        AND user_id = @userId
+        id = ?
+        AND user_id = ?
         AND status = 'active'
-    `);
+      LIMIT 1
+    `,
+    [
+      subscriptionId,
+      userId,
+    ]
+  );
 
-  if (result.recordset.length === 0) {
+  if (existingRows.length === 0) {
     throw new Error(
       "Active subscription not found."
     );
   }
 
-  return result.recordset[0];
+  // ==========================================
+  // CANCEL SUBSCRIPTION
+  // ==========================================
+
+  await pool.execute(
+    `
+      UPDATE subscriptions
+      SET
+        status = 'cancelled',
+        auto_renew = 0,
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE
+        id = ?
+        AND user_id = ?
+        AND status = 'active'
+    `,
+    [
+      subscriptionId,
+      userId,
+    ]
+  );
+
+  // ==========================================
+  // RETURN UPDATED SUBSCRIPTION
+  // ==========================================
+
+  const [rows] = await pool.execute(
+    `
+      SELECT
+        id,
+        user_id,
+        plan_id,
+        status,
+        start_date,
+        end_date,
+        auto_renew,
+        payment_id
+      FROM subscriptions
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [subscriptionId]
+  );
+
+  if (rows.length === 0) {
+    throw new Error(
+      "Active subscription not found."
+    );
+  }
+
+  return rows[0];
 };
 
 // ==========================================
@@ -542,16 +618,9 @@ const cancelSubscription = async (
 const hasActiveSubscription = async (userId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input(
-      "userId",
-      sql.UniqueIdentifier,
-      userId
-    )
-    .query(`
-      SELECT TOP 1
-
+  const [rows] = await pool.execute(
+    `
+      SELECT
         s.id,
         s.user_id,
         s.plan_id,
@@ -571,14 +640,18 @@ const hasActiveSubscription = async (userId) => {
         ON s.plan_id = p.id
 
       WHERE
-        s.user_id = @userId
+        s.user_id = ?
         AND s.status = 'active'
-        AND s.end_date > SYSUTCDATETIME()
+        AND s.end_date > UTC_TIMESTAMP()
 
       ORDER BY s.end_date DESC
-    `);
 
-  return result.recordset[0] || null;
+      LIMIT 1
+    `,
+    [userId]
+  );
+
+  return rows[0] || null;
 };
 
 // ==========================================

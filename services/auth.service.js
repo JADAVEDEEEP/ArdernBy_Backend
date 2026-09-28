@@ -1,12 +1,14 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const { randomUUID } = require("crypto");
 
-const { sql, poolPromise } = require("../config/sql");
+const { poolPromise } = require("../config/sql");
 
 const {
   transporter,
   getBrevoSender,
 } = require("../config/mailer");
+
 const { getJwtSecret } = require("../config/jwt");
 const sendWelcomeEmail = require("../utils/welcomeEmail");
 const { OAuth2Client } = require("google-auth-library");
@@ -46,11 +48,9 @@ const generateToken = (user) => {
 const findUserByEmail = async (email) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("email", sql.VarChar(255), email)
-    .query(`
-      SELECT TOP 1
+  const [rows] = await pool.execute(
+    `
+      SELECT
         id,
         full_name,
         phone,
@@ -63,11 +63,14 @@ const findUserByEmail = async (email) => {
         email_verified,
         is_active,
         updated_at
-      FROM dbo.profiles
-      WHERE email = @email
-    `);
+      FROM profiles
+      WHERE email = ?
+      LIMIT 1
+    `,
+    [email]
+  );
 
-  return result.recordset[0] || null;
+  return rows[0] || null;
 };
 
 // =====================================================
@@ -83,31 +86,11 @@ const createCustomer = async ({
   const pool = await poolPromise;
 
   const passwordHash = await bcrypt.hash(password, 12);
+  const userId = randomUUID();
 
-  const result = await pool
-    .request()
-    .input(
-      "fullName",
-      sql.VarChar(150),
-      fullName || null
-    )
-    .input(
-      "phone",
-      sql.VarChar(30),
-      phone || null
-    )
-    .input(
-      "email",
-      sql.VarChar(255),
-      email
-    )
-    .input(
-      "passwordHash",
-      sql.VarChar(255),
-      passwordHash
-    )
-    .query(`
-      INSERT INTO dbo.profiles
+  await pool.execute(
+    `
+      INSERT INTO profiles
       (
         id,
         full_name,
@@ -121,32 +104,49 @@ const createCustomer = async ({
         created_at,
         updated_at
       )
-      OUTPUT
-        INSERTED.id,
-        INSERTED.full_name,
-        INSERTED.phone,
-        INSERTED.email,
-        INSERTED.role,
-        INSERTED.auth_provider,
-        INSERTED.email_verified,
-        INSERTED.is_active
       VALUES
       (
-        NEWID(),
-        @fullName,
-        @phone,
-        @email,
-        @passwordHash,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
         'customer',
         'email',
         0,
         1,
-        SYSUTCDATETIME(),
-        SYSUTCDATETIME()
+        UTC_TIMESTAMP(6),
+        UTC_TIMESTAMP(6)
       )
-    `);
+    `,
+    [
+      userId,
+      fullName || null,
+      phone || null,
+      email,
+      passwordHash,
+    ]
+  );
 
-  return result.recordset[0];
+  const [rows] = await pool.execute(
+    `
+      SELECT
+        id,
+        full_name,
+        phone,
+        email,
+        role,
+        auth_provider,
+        email_verified,
+        is_active
+      FROM profiles
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [userId]
+  );
+
+  return rows[0] || null;
 };
 
 // =====================================================
@@ -168,58 +168,34 @@ const sendOTP = async ({
     Date.now() + 10 * 60 * 1000
   );
 
-  // Invalidate previous OTP
-  await pool
-    .request()
-    .input(
-      "email",
-      sql.VarChar(255),
-      email
-    )
-    .input(
-      "purpose",
-      sql.VarChar(50),
-      purpose
-    )
-    .query(`
-      UPDATE dbo.email_otps
-      SET used_at = SYSUTCDATETIME()
-      WHERE
-        email = @email
-        AND purpose = @purpose
-        AND used_at IS NULL
-    `);
+  // ===================================================
+  // INVALIDATE PREVIOUS OTP
+  // ===================================================
 
-  // Save OTP hash
-  await pool
-    .request()
-    .input(
-      "userId",
-      sql.UniqueIdentifier,
-      userId
-    )
-    .input(
-      "email",
-      sql.VarChar(255),
-      email
-    )
-    .input(
-      "otpHash",
-      sql.VarChar(255),
-      otpHash
-    )
-    .input(
-      "purpose",
-      sql.VarChar(50),
-      purpose
-    )
-    .input(
-      "expiresAt",
-      sql.DateTime2,
-      expiresAt
-    )
-    .query(`
-      INSERT INTO dbo.email_otps
+  await pool.execute(
+    `
+      UPDATE email_otps
+      SET used_at = UTC_TIMESTAMP(6)
+      WHERE
+        email = ?
+        AND purpose = ?
+        AND used_at IS NULL
+    `,
+    [
+      email,
+      purpose,
+    ]
+  );
+
+  // ===================================================
+  // SAVE OTP HASH
+  // ===================================================
+
+  const otpId = randomUUID();
+
+  await pool.execute(
+    `
+      INSERT INTO email_otps
       (
         id,
         user_id,
@@ -232,27 +208,42 @@ const sendOTP = async ({
       )
       VALUES
       (
-        NEWID(),
-        @userId,
-        @email,
-        @otpHash,
-        @purpose,
-        @expiresAt,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
         0,
-        SYSUTCDATETIME()
+        UTC_TIMESTAMP(6)
       )
-    `);
+    `,
+    [
+      otpId,
+      userId,
+      email,
+      otpHash,
+      purpose,
+      expiresAt,
+    ]
+  );
 
-  // Send OTP email
+  // ===================================================
+  // SEND OTP EMAIL
+  // ===================================================
+
   const sender = getBrevoSender();
 
   await transporter.sendMail({
     from: sender.from,
+
     envelope: {
       from: sender.envelopeFrom,
       to: email,
     },
+
     to: email,
+
     subject: "Your ARDENBY Verification Code",
 
     html: `
@@ -260,10 +251,12 @@ const sendOTP = async ({
 <html>
 <head>
   <meta charset="UTF-8" />
+
   <meta
     name="viewport"
     content="width=device-width, initial-scale=1.0"
   />
+
   <title>ARDENBY Verification</title>
 </head>
 
@@ -280,7 +273,10 @@ const sendOTP = async ({
     cellpadding="0"
     cellspacing="0"
     border="0"
-    style="background:#F4F1EC; padding:45px 15px;"
+    style="
+      background:#F4F1EC;
+      padding:45px 15px;
+    "
   >
     <tr>
       <td align="center">
@@ -361,6 +357,7 @@ const sendOTP = async ({
                 "
               >
                 <tr>
+
                   <td
                     align="center"
                     style="padding:28px 20px;"
@@ -389,6 +386,7 @@ const sendOTP = async ({
                     </div>
 
                   </td>
+
                 </tr>
               </table>
 
@@ -424,10 +422,13 @@ const sendOTP = async ({
                     line-height:1.6;
                     color:#666666;
                   ">
+
                     This verification code will expire in
+
                     <strong style="color:#333333;">
                       10 minutes
                     </strong>.
+
                   </td>
 
                 </tr>
@@ -455,6 +456,7 @@ const sendOTP = async ({
           </tr>
 
           <tr>
+
             <td style="
               background:#171717;
               padding:25px 30px;
@@ -482,6 +484,7 @@ const sendOTP = async ({
               </p>
 
             </td>
+
           </tr>
 
         </table>
@@ -509,9 +512,9 @@ const authenticate = async ({
 }) => {
   const user = await findUserByEmail(email);
 
-  // ===========================================
+  // ===================================================
   // NEW USER
-  // ===========================================
+  // ===================================================
 
   if (!user) {
     const newUser = await createCustomer({
@@ -533,16 +536,19 @@ const authenticate = async ({
       isNewUser: true,
       requiresOTP: true,
       purpose: "email_verification",
-      message: "Account created. OTP sent to your email.",
+      message:
+        "Account created. OTP sent to your email.",
     };
   }
 
-  // ===========================================
+  // ===================================================
   // EXISTING USER
-  // ===========================================
+  // ===================================================
 
   if (!user.is_active) {
-    throw new Error("Your account is inactive.");
+    throw new Error(
+      "Your account is inactive."
+    );
   }
 
   if (!user.password_hash) {
@@ -557,7 +563,9 @@ const authenticate = async ({
   );
 
   if (!passwordMatch) {
-    throw new Error("Invalid email or password.");
+    throw new Error(
+      "Invalid email or password."
+    );
   }
 
   await sendOTP({
@@ -572,7 +580,8 @@ const authenticate = async ({
     isNewUser: false,
     requiresOTP: true,
     purpose: "login",
-    message: "OTP sent to your email.",
+    message:
+      "OTP sent to your email.",
   };
 };
 
@@ -587,20 +596,9 @@ const verifyUserOTP = async ({
 }) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input(
-      "email",
-      sql.VarChar(255),
-      email
-    )
-    .input(
-      "purpose",
-      sql.VarChar(50),
-      purpose
-    )
-    .query(`
-      SELECT TOP 1
+  const [rows] = await pool.execute(
+    `
+      SELECT
         id,
         user_id,
         email,
@@ -609,18 +607,26 @@ const verifyUserOTP = async ({
         expires_at,
         attempts,
         used_at
-      FROM dbo.email_otps
+      FROM email_otps
       WHERE
-        email = @email
-        AND purpose = @purpose
+        email = ?
+        AND purpose = ?
         AND used_at IS NULL
       ORDER BY created_at DESC
-    `);
+      LIMIT 1
+    `,
+    [
+      email,
+      purpose,
+    ]
+  );
 
-  const otpRecord = result.recordset[0];
+  const otpRecord = rows[0];
 
   if (!otpRecord) {
-    throw new Error("OTP not found or already used.");
+    throw new Error(
+      "OTP not found or already used."
+    );
   }
 
   if (otpRecord.attempts >= 5) {
@@ -633,7 +639,9 @@ const verifyUserOTP = async ({
     new Date(otpRecord.expires_at).getTime() <
     Date.now()
   ) {
-    throw new Error("OTP has expired.");
+    throw new Error(
+      "OTP has expired."
+    );
   }
 
   const valid = verifyOTP(
@@ -642,73 +650,57 @@ const verifyUserOTP = async ({
   );
 
   if (!valid) {
-    await pool
-      .request()
-      .input(
-        "otpId",
-        sql.UniqueIdentifier,
-        otpRecord.id
-      )
-      .query(`
-        UPDATE dbo.email_otps
+    await pool.execute(
+      `
+        UPDATE email_otps
         SET attempts = attempts + 1
-        WHERE id = @otpId
-      `);
+        WHERE id = ?
+      `,
+      [otpRecord.id]
+    );
 
-    throw new Error("Invalid OTP.");
+    throw new Error(
+      "Invalid OTP."
+    );
   }
 
-  // ===========================================
+  // ===================================================
   // MARK OTP USED
-  // ===========================================
+  // ===================================================
 
-  await pool
-    .request()
-    .input(
-      "otpId",
-      sql.UniqueIdentifier,
-      otpRecord.id
-    )
-    .query(`
-      UPDATE dbo.email_otps
-      SET used_at = SYSUTCDATETIME()
-      WHERE id = @otpId
-    `);
+  await pool.execute(
+    `
+      UPDATE email_otps
+      SET used_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
+    `,
+    [otpRecord.id]
+  );
 
-  // ===========================================
+  // ===================================================
   // MARK EMAIL VERIFIED
-  // ===========================================
+  // ===================================================
 
   if (purpose === "email_verification") {
-    await pool
-      .request()
-      .input(
-        "userId",
-        sql.UniqueIdentifier,
-        otpRecord.user_id
-      )
-      .query(`
-        UPDATE dbo.profiles
+    await pool.execute(
+      `
+        UPDATE profiles
         SET
           email_verified = 1,
-          updated_at = SYSUTCDATETIME()
-        WHERE id = @userId
-      `);
+          updated_at = UTC_TIMESTAMP(6)
+        WHERE id = ?
+      `,
+      [otpRecord.user_id]
+    );
   }
 
-  // ===========================================
+  // ===================================================
   // GET USER
-  // ===========================================
+  // ===================================================
 
-  const userResult = await pool
-    .request()
-    .input(
-      "userId",
-      sql.UniqueIdentifier,
-      otpRecord.user_id
-    )
-    .query(`
-      SELECT TOP 1
+  const [userRows] = await pool.execute(
+    `
+      SELECT
         id,
         full_name,
         phone,
@@ -719,24 +711,32 @@ const verifyUserOTP = async ({
         email_verified,
         is_active,
         updated_at
-      FROM dbo.profiles
-      WHERE id = @userId
-    `);
+      FROM profiles
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [otpRecord.user_id]
+  );
 
-  const user = userResult.recordset[0];
+  const user = userRows[0];
 
   if (!user) {
-    throw new Error("User not found.");
+    throw new Error(
+      "User not found."
+    );
   }
 
-  // ===========================================
+  // ===================================================
   // PASSWORD RESET OTP
   // OTP VERIFIED → SHORT-LIVED RESET TOKEN
-  // ===========================================
+  // ===================================================
 
   if (purpose === "password_reset") {
+
     if (!user.is_active) {
-      throw new Error("Your account is inactive.");
+      throw new Error(
+        "Your account is inactive."
+      );
     }
 
     if (user.auth_provider === "google") {
@@ -765,10 +765,10 @@ const verifyUserOTP = async ({
     };
   }
 
-  // ===========================================
+  // ===================================================
   // WELCOME EMAIL
   // ONLY AFTER NEW USER VERIFICATION
-  // ===========================================
+  // ===================================================
 
   if (purpose === "email_verification") {
     await sendWelcomeEmail({
@@ -777,9 +777,9 @@ const verifyUserOTP = async ({
     });
   }
 
-  // ===========================================
+  // ===================================================
   // JWT
-  // ===========================================
+  // ===================================================
 
   const token = generateToken(user);
 
@@ -794,9 +794,13 @@ const verifyUserOTP = async ({
 // =====================================================
 
 const requestPasswordReset = async (email) => {
-  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedEmail =
+    email.trim().toLowerCase();
 
-  const user = await findUserByEmail(normalizedEmail);
+  const user =
+    await findUserByEmail(
+      normalizedEmail
+    );
 
   /*
     IMPORTANT:
@@ -837,7 +841,8 @@ const requestPasswordReset = async (email) => {
     email: user.email,
     requiresOTP: true,
     purpose: "password_reset",
-    message: "Password reset OTP sent to your email.",
+    message:
+      "Password reset OTP sent to your email.",
   };
 };
 
@@ -850,7 +855,8 @@ const resendOTP = async ({
   userId,
   purpose,
 }) => {
-  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedEmail =
+    email.trim().toLowerCase();
 
   const allowedPurposes = [
     "login",
@@ -859,17 +865,26 @@ const resendOTP = async ({
   ];
 
   if (!allowedPurposes.includes(purpose)) {
-    throw new Error("Invalid OTP purpose.");
+    throw new Error(
+      "Invalid OTP purpose."
+    );
   }
 
-  const user = await findUserByEmail(normalizedEmail);
+  const user =
+    await findUserByEmail(
+      normalizedEmail
+    );
 
   if (!user || !user.is_active) {
-    throw new Error("Unable to resend OTP.");
+    throw new Error(
+      "Unable to resend OTP."
+    );
   }
 
   if (userId && user.id !== userId) {
-    throw new Error("Invalid OTP request.");
+    throw new Error(
+      "Invalid OTP request."
+    );
   }
 
   if (
@@ -893,7 +908,8 @@ const resendOTP = async ({
   return {
     email: user.email,
     purpose,
-    message: "A new OTP has been sent to your email.",
+    message:
+      "A new OTP has been sent to your email.",
   };
 };
 
@@ -906,6 +922,7 @@ const resetPassword = async ({
   resetToken,
   newPassword,
 }) => {
+
   if (!resetToken) {
     throw new Error(
       "Password reset token is required."
@@ -913,7 +930,9 @@ const resetPassword = async ({
   }
 
   if (!newPassword) {
-    throw new Error("New password is required.");
+    throw new Error(
+      "New password is required."
+    );
   }
 
   if (newPassword.length < 8) {
@@ -935,10 +954,10 @@ const resetPassword = async ({
     );
   }
 
-  // ===========================================
+  // ===================================================
   // RESET TOKEN MUST BE SPECIFICALLY FOR
   // PASSWORD RESET
-  // ===========================================
+  // ===================================================
 
   if (
     !decoded ||
@@ -954,42 +973,39 @@ const resetPassword = async ({
 
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input(
-      "userId",
-      sql.UniqueIdentifier,
-      decoded.id
-    )
-    .input(
-      "email",
-      sql.VarChar(255),
-      decoded.email
-    )
-    .query(`
-      SELECT TOP 1
+  const [rows] = await pool.execute(
+    `
+      SELECT
         id,
         email,
         password_hash,
         auth_provider,
         is_active,
         updated_at
-      FROM dbo.profiles
+      FROM profiles
       WHERE
-        id = @userId
-        AND email = @email
+        id = ?
+        AND email = ?
         AND is_active = 1
-    `);
+      LIMIT 1
+    `,
+    [
+      decoded.id,
+      decoded.email,
+    ]
+  );
 
-  if (result.recordset.length === 0) {
-    throw new Error("User not found.");
+  if (rows.length === 0) {
+    throw new Error(
+      "User not found."
+    );
   }
 
-  const user = result.recordset[0];
+  const user = rows[0];
 
-  // ===========================================
+  // ===================================================
   // GOOGLE ACCOUNT
-  // ===========================================
+  // ===================================================
 
   if (user.auth_provider === "google") {
     throw new Error(
@@ -997,17 +1013,19 @@ const resetPassword = async ({
     );
   }
 
-  // ===========================================
+  // ===================================================
   // PREVENT RESET TOKEN REUSE
   //
   // If password was already changed after
   // this token was issued, reject the token.
-  // ===========================================
+  // ===================================================
 
   if (user.updated_at) {
-    const updatedAt = new Date(
-      user.updated_at
-    ).getTime();
+
+    const updatedAt =
+      new Date(
+        user.updated_at
+      ).getTime();
 
     const tokenIssuedAt =
       decoded.iat * 1000;
@@ -1019,15 +1037,17 @@ const resetPassword = async ({
     }
   }
 
-  // ===========================================
+  // ===================================================
   // DON'T ALLOW SAME PASSWORD
-  // ===========================================
+  // ===================================================
 
   if (user.password_hash) {
-    const samePassword = await bcrypt.compare(
-      newPassword,
-      user.password_hash
-    );
+
+    const samePassword =
+      await bcrypt.compare(
+        newPassword,
+        user.password_hash
+      );
 
     if (samePassword) {
       throw new Error(
@@ -1036,42 +1056,37 @@ const resetPassword = async ({
     }
   }
 
-  // ===========================================
+  // ===================================================
   // HASH NEW PASSWORD
-  // ===========================================
+  // ===================================================
 
-  const newPasswordHash = await bcrypt.hash(
-    newPassword,
-    12
-  );
+  const newPasswordHash =
+    await bcrypt.hash(
+      newPassword,
+      12
+    );
 
-  // ===========================================
+  // ===================================================
   // UPDATE PASSWORD
-  // ===========================================
+  // ===================================================
 
-  await pool
-    .request()
-    .input(
-      "userId",
-      sql.UniqueIdentifier,
-      user.id
-    )
-    .input(
-      "passwordHash",
-      sql.VarChar(255),
-      newPasswordHash
-    )
-    .query(`
-      UPDATE dbo.profiles
+  await pool.execute(
+    `
+      UPDATE profiles
       SET
-        password_hash = @passwordHash,
+        password_hash = ?,
         auth_provider = 'email',
         email_verified = 1,
-        updated_at = SYSUTCDATETIME()
+        updated_at = UTC_TIMESTAMP(6)
       WHERE
-        id = @userId
+        id = ?
         AND is_active = 1
-    `);
+    `,
+    [
+      newPasswordHash,
+      user.id,
+    ]
+  );
 
   return true;
 };
@@ -1081,15 +1096,16 @@ const resetPassword = async ({
 // =====================================================
 
 const googleLogin = async (credential) => {
+
   if (!credential) {
     throw new Error(
       "Google credential is required."
     );
   }
 
-  // ==========================================
+  // ===================================================
   // VERIFY GOOGLE ID TOKEN
-  // ==========================================
+  // ===================================================
 
   const ticket =
     await googleClient.verifyIdToken({
@@ -1098,7 +1114,8 @@ const googleLogin = async (credential) => {
         process.env.GOOGLE_CLIENT_ID,
     });
 
-  const payload = ticket.getPayload();
+  const payload =
+    ticket.getPayload();
 
   const {
     sub: googleId,
@@ -1116,95 +1133,81 @@ const googleLogin = async (credential) => {
   const normalizedEmail =
     email.trim().toLowerCase();
 
-  // ==========================================
+  // ===================================================
   // FIND EXISTING USER
-  // ==========================================
+  // ===================================================
 
   const existingUser =
     await findUserByEmail(
       normalizedEmail
     );
 
-  // ==========================================
+  // ===================================================
   // EXISTING USER
-  // ==========================================
+  // ===================================================
 
   if (existingUser) {
 
-    // ========================================
+    // =================================================
     // PREVIOUSLY DELETED / INACTIVE USER
-    // ========================================
+    // =================================================
 
     if (!existingUser.is_active) {
-      const pool = await poolPromise;
 
-      await pool
-        .request()
-        .input(
-          "userId",
-          sql.UniqueIdentifier,
-          existingUser.id
-        )
-        .input(
-          "fullName",
-          sql.VarChar(150),
-          name || null
-        )
-        .input(
-          "email",
-          sql.VarChar(255),
-          normalizedEmail
-        )
-        .input(
-          "googleId",
-          sql.VarChar(255),
-          googleId
-        )
-        .query(`
-          UPDATE dbo.profiles
+      const pool =
+        await poolPromise;
+
+      await pool.execute(
+        `
+          UPDATE profiles
           SET
-            full_name = @fullName,
+            full_name = ?,
             phone = NULL,
-            email = @email,
+            email = ?,
             password_hash = NULL,
             auth_provider = 'google',
-            google_id = @googleId,
+            google_id = ?,
             email_verified = 1,
             is_active = 1,
-            updated_at = SYSUTCDATETIME()
-          WHERE id = @userId;
-        `);
+            updated_at = UTC_TIMESTAMP(6)
+          WHERE id = ?
+        `,
+        [
+          name || null,
+          normalizedEmail,
+          googleId,
+          existingUser.id,
+        ]
+      );
 
-      // Get updated user AFTER UPDATE.
-      // No OUTPUT because dbo.profiles
-      // has enabled triggers.
+      // ===============================================
+      // GET UPDATED USER AFTER UPDATE
+      // ===============================================
 
-      const userResult = await pool
-        .request()
-        .input(
-          "userId",
-          sql.UniqueIdentifier,
-          existingUser.id
-        )
-        .query(`
-          SELECT TOP 1
-            id,
-            full_name,
-            phone,
-            email,
-            gender,
-            role,
-            auth_provider,
-            google_id,
-            email_verified,
-            is_active,
-            updated_at
-          FROM dbo.profiles
-          WHERE id = @userId;
-        `);
+      const [userRows] =
+        await pool.execute(
+          `
+            SELECT
+              id,
+              full_name,
+              phone,
+              email,
+              gender,
+              role,
+              auth_provider,
+              google_id,
+              email_verified,
+              is_active,
+              updated_at
+            FROM profiles
+            WHERE id = ?
+            LIMIT 1
+          `,
+          [existingUser.id]
+        );
 
       const user =
-        userResult.recordset[0];
+        userRows[0];
 
       if (!user) {
         throw new Error(
@@ -1212,8 +1215,9 @@ const googleLogin = async (credential) => {
         );
       }
 
-      // Welcome email because this is treated
-      // as a fresh ARDENBY customer.
+      // ===============================================
+      // WELCOME EMAIL
+      // ===============================================
 
       await sendWelcomeEmail({
         email: user.email,
@@ -1227,9 +1231,9 @@ const googleLogin = async (credential) => {
       };
     }
 
-    // ========================================
+    // =================================================
     // ACTIVE EMAIL/PASSWORD ACCOUNT
-    // ========================================
+    // =================================================
 
     if (
       existingUser.auth_provider ===
@@ -1240,9 +1244,9 @@ const googleLogin = async (credential) => {
       );
     }
 
-    // ========================================
+    // =================================================
     // ACTIVE GOOGLE ACCOUNT
-    // ========================================
+    // =================================================
 
     if (
       existingUser.google_id !==
@@ -1254,37 +1258,28 @@ const googleLogin = async (credential) => {
     }
 
     return {
-      token: generateToken(existingUser),
+      token:
+        generateToken(existingUser),
+
       user: existingUser,
+
       isNewUser: false,
     };
   }
 
-  // ==========================================
+  // ===================================================
   // BRAND NEW GOOGLE USER
-  // ==========================================
+  // ===================================================
 
-  const pool = await poolPromise;
+  const pool =
+    await poolPromise;
 
-  await pool
-    .request()
-    .input(
-      "fullName",
-      sql.VarChar(150),
-      name || null
-    )
-    .input(
-      "email",
-      sql.VarChar(255),
-      normalizedEmail
-    )
-    .input(
-      "googleId",
-      sql.VarChar(255),
-      googleId
-    )
-    .query(`
-      INSERT INTO dbo.profiles
+  const userId =
+    randomUUID();
+
+  await pool.execute(
+    `
+      INSERT INTO profiles
       (
         id,
         full_name,
@@ -1300,50 +1295,56 @@ const googleLogin = async (credential) => {
       )
       VALUES
       (
-        NEWID(),
-        @fullName,
-        @email,
+        ?,
+        ?,
+        ?,
         NULL,
         'customer',
         'google',
-        @googleId,
+        ?,
         1,
         1,
-        SYSUTCDATETIME(),
-        SYSUTCDATETIME()
-      );
-    `);
+        UTC_TIMESTAMP(6),
+        UTC_TIMESTAMP(6)
+      )
+    `,
+    [
+      userId,
+      name || null,
+      normalizedEmail,
+      googleId,
+    ]
+  );
 
-  // Get newly created user.
-  // No OUTPUT because dbo.profiles has triggers.
+  // ===================================================
+  // GET NEWLY CREATED USER
+  // ===================================================
 
-  const userResult = await pool
-    .request()
-    .input(
-      "email",
-      sql.VarChar(255),
-      normalizedEmail
-    )
-    .query(`
-      SELECT TOP 1
-        id,
-        full_name,
-        phone,
-        email,
-        gender,
-        role,
-        auth_provider,
-        google_id,
-        email_verified,
-        is_active,
-        updated_at
-      FROM dbo.profiles
-      WHERE email = @email
-      ORDER BY created_at DESC;
-    `);
+  const [userRows] =
+    await pool.execute(
+      `
+        SELECT
+          id,
+          full_name,
+          phone,
+          email,
+          gender,
+          role,
+          auth_provider,
+          google_id,
+          email_verified,
+          is_active,
+          updated_at
+        FROM profiles
+        WHERE email = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      [normalizedEmail]
+    );
 
   const user =
-    userResult.recordset[0];
+    userRows[0];
 
   if (!user) {
     throw new Error(
@@ -1351,22 +1352,25 @@ const googleLogin = async (credential) => {
     );
   }
 
-  // ==========================================
+  // ===================================================
   // WELCOME EMAIL
-  // ==========================================
+  // ===================================================
 
   await sendWelcomeEmail({
     email: user.email,
     name: user.full_name,
   });
 
-  // ==========================================
+  // ===================================================
   // RETURN
-  // ==========================================
+  // ===================================================
 
   return {
-    token: generateToken(user),
+    token:
+      generateToken(user),
+
     user,
+
     isNewUser: true,
   };
 };

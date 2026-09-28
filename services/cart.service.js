@@ -1,37 +1,37 @@
-const { sql, poolPromise } = require("../config/sql");
+const { randomUUID } = require("crypto");
+const { poolPromise } = require("../config/sql");
 const couponService = require("./coupon.service");
 
 // GET USER CART
 const getCart = async (userId) => {
   const pool = await poolPromise;
 
-  const cartResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [cartRows] = await pool.execute(
+    `
       SELECT
         id,
         user_id,
         coupon_code,
         created_at,
         updated_at
-      FROM dbo.carts
-      WHERE user_id = @userId
-    `);
+      FROM carts
+      WHERE user_id = ?
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (cartResult.recordset.length === 0) {
+  if (cartRows.length === 0) {
     return {
       cart: null,
       items: [],
     };
   }
 
-  const cart = cartResult.recordset[0];
+  const cart = cartRows[0];
 
-  const itemsResult = await pool
-    .request()
-    .input("cartId", sql.UniqueIdentifier, cart.id)
-    .query(`
+  const [itemRows] = await pool.execute(
+    `
       SELECT
         id,
         cart_id,
@@ -46,14 +46,16 @@ const getCart = async (userId) => {
         mrp_snapshot,
         created_at,
         updated_at
-      FROM dbo.cart_items
-      WHERE cart_id = @cartId
+      FROM cart_items
+      WHERE cart_id = ?
       ORDER BY created_at ASC
-    `);
+    `,
+    [cart.id]
+  );
 
   return {
     cart,
-    items: itemsResult.recordset,
+    items: itemRows,
   };
 };
 
@@ -61,29 +63,30 @@ const getCart = async (userId) => {
 const createCart = async (userId) => {
   const pool = await poolPromise;
 
-  const existing = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [existingRows] = await pool.execute(
+    `
       SELECT
         id,
         user_id,
         coupon_code,
         created_at,
         updated_at
-      FROM dbo.carts
-      WHERE user_id = @userId
-    `);
+      FROM carts
+      WHERE user_id = ?
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (existing.recordset.length > 0) {
-    return existing.recordset[0];
+  if (existingRows.length > 0) {
+    return existingRows[0];
   }
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
-      INSERT INTO dbo.carts
+  const id = randomUUID();
+
+  await pool.execute(
+    `
+      INSERT INTO carts
       (
         id,
         user_id,
@@ -91,23 +94,34 @@ const createCart = async (userId) => {
         created_at,
         updated_at
       )
-      OUTPUT
-        INSERTED.id,
-        INSERTED.user_id,
-        INSERTED.coupon_code,
-        INSERTED.created_at,
-        INSERTED.updated_at
       VALUES
       (
-        NEWID(),
-        @userId,
+        ?,
+        ?,
         NULL,
-        SYSUTCDATETIME(),
-        SYSUTCDATETIME()
+        UTC_TIMESTAMP(6),
+        UTC_TIMESTAMP(6)
       )
-    `);
+    `,
+    [id, userId]
+  );
 
-  return result.recordset[0];
+  const [rows] = await pool.execute(
+    `
+      SELECT
+        id,
+        user_id,
+        coupon_code,
+        created_at,
+        updated_at
+      FROM carts
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [id]
+  );
+
+  return rows[0];
 };
 
 // ADD ITEM TO CART
@@ -131,50 +145,49 @@ const addCartItem = async (userId, item) => {
   const pool = await poolPromise;
 
   // Find user's cart
-  let cartResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [cartRows] = await pool.execute(
+    `
       SELECT id
-      FROM dbo.carts
-      WHERE user_id = @userId
-    `);
+      FROM carts
+      WHERE user_id = ?
+      LIMIT 1
+    `,
+    [userId]
+  );
 
   let cartId;
 
-  if (cartResult.recordset.length === 0) {
+  if (cartRows.length === 0) {
     const newCart = await createCart(userId);
     cartId = newCart.id;
   } else {
-    cartId = cartResult.recordset[0].id;
+    cartId = cartRows[0].id;
   }
 
   // Get product
-  const productResult = await pool
-    .request()
-    .input("productId", sql.NVarChar(100), product_id)
-    .query(`
+  const [productRows] = await pool.execute(
+    `
       SELECT
         id,
         name,
         price,
         mrp
-      FROM dbo.products
-      WHERE id = @productId
-    `);
+      FROM products
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [product_id]
+  );
 
-  if (productResult.recordset.length === 0) {
+  if (productRows.length === 0) {
     throw new Error("Product not found.");
   }
 
-  const product = productResult.recordset[0];
+  const product = productRows[0];
 
   // Get variant
-  const variantResult = await pool
-    .request()
-    .input("variantId", sql.UniqueIdentifier, variant_id)
-    .input("productId", sql.NVarChar(100), product_id)
-    .query(`
+  const [variantRows] = await pool.execute(
+    `
       SELECT
         id,
         product_id,
@@ -182,16 +195,19 @@ const addCartItem = async (userId, item) => {
         color,
         inventory,
         sku
-      FROM dbo.product_variants
-      WHERE id = @variantId
-        AND product_id = @productId
-    `);
+      FROM product_variants
+      WHERE id = ?
+        AND product_id = ?
+      LIMIT 1
+    `,
+    [variant_id, product_id]
+  );
 
-  if (variantResult.recordset.length === 0) {
+  if (variantRows.length === 0) {
     throw new Error("Product variant not found.");
   }
 
-  const variant = variantResult.recordset[0];
+  const variant = variantRows[0];
 
   // Check inventory
   if (variant.inventory < quantity) {
@@ -199,24 +215,23 @@ const addCartItem = async (userId, item) => {
   }
 
   // Check existing cart item
-  const existingItem = await pool
-    .request()
-    .input("cartId", sql.UniqueIdentifier, cartId)
-    .input("productId", sql.NVarChar(100), product_id)
-    .input("variantId", sql.UniqueIdentifier, variant_id)
-    .query(`
+  const [existingItemRows] = await pool.execute(
+    `
       SELECT
         id,
         quantity
-      FROM dbo.cart_items
-      WHERE cart_id = @cartId
-        AND product_id = @productId
-        AND variant_id = @variantId
-    `);
+      FROM cart_items
+      WHERE cart_id = ?
+        AND product_id = ?
+        AND variant_id = ?
+      LIMIT 1
+    `,
+    [cartId, product_id, variant_id]
+  );
 
   // If item already exists, increase quantity
-  if (existingItem.recordset.length > 0) {
-    const existing = existingItem.recordset[0];
+  if (existingItemRows.length > 0) {
+    const existing = existingItemRows[0];
 
     const newQuantity = existing.quantity + quantity;
 
@@ -224,71 +239,45 @@ const addCartItem = async (userId, item) => {
       throw new Error("Insufficient variant inventory.");
     }
 
-    await pool
-      .request()
-      .input("itemId", sql.UniqueIdentifier, existing.id)
-      .input("quantity", sql.Int, newQuantity)
-      .query(`
-        UPDATE dbo.cart_items
+    await pool.execute(
+      `
+        UPDATE cart_items
         SET
-          quantity = @quantity,
-          updated_at = SYSUTCDATETIME()
-        WHERE id = @itemId
-      `);
+          quantity = ?,
+          updated_at = UTC_TIMESTAMP(6)
+        WHERE id = ?
+      `,
+      [newQuantity, existing.id]
+    );
 
     return getCart(userId);
   }
 
   // Get primary image
-  const imageResult = await pool
-    .request()
-    .input("productId", sql.NVarChar(100), product_id)
-    .query(`
-      SELECT TOP 1
-        image_url
-      FROM dbo.product_images
-      WHERE product_id = @productId
+  const [imageRows] = await pool.execute(
+    `
+      SELECT image_url
+      FROM product_images
+      WHERE product_id = ?
       ORDER BY
         is_primary DESC,
         sort_order ASC
-    `);
+      LIMIT 1
+    `,
+    [product_id]
+  );
 
   const imageSnapshot =
-    imageResult.recordset.length > 0
-      ? imageResult.recordset[0].image_url
+    imageRows.length > 0
+      ? imageRows[0].image_url
       : null;
 
   // Insert cart item
-  await pool
-    .request()
-    .input("cartId", sql.UniqueIdentifier, cartId)
-    .input("productId", sql.NVarChar(100), product_id)
-    .input("variantId", sql.UniqueIdentifier, variant_id)
-    .input(
-      "productNameSnapshot",
-      sql.NVarChar(200),
-      product.name
-    )
-    .input(
-      "imageSnapshot",
-      sql.NVarChar(2048),
-      imageSnapshot
-    )
-    .input("size", sql.NVarChar(10), variant.size)
-    .input("color", sql.NVarChar(30), variant.color)
-    .input("quantity", sql.Int, quantity)
-    .input(
-      "priceSnapshot",
-      sql.Decimal(18, 2),
-      product.price
-    )
-    .input(
-      "mrpSnapshot",
-      sql.Decimal(18, 2),
-      product.mrp
-    )
-    .query(`
-      INSERT INTO dbo.cart_items
+  const cartItemId = randomUUID();
+
+  await pool.execute(
+    `
+      INSERT INTO cart_items
       (
         id,
         cart_id,
@@ -306,21 +295,35 @@ const addCartItem = async (userId, item) => {
       )
       VALUES
       (
-        NEWID(),
-        @cartId,
-        @productId,
-        @variantId,
-        @productNameSnapshot,
-        @imageSnapshot,
-        @size,
-        @color,
-        @quantity,
-        @priceSnapshot,
-        @mrpSnapshot,
-        SYSUTCDATETIME(),
-        SYSUTCDATETIME()
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        UTC_TIMESTAMP(6),
+        UTC_TIMESTAMP(6)
       )
-    `);
+    `,
+    [
+      cartItemId,
+      cartId,
+      product_id,
+      variant_id,
+      product.name,
+      imageSnapshot,
+      variant.size,
+      variant.color,
+      quantity,
+      product.price,
+      product.mrp,
+    ]
+  );
 
   return getCart(userId);
 };
@@ -333,57 +336,57 @@ const updateCartItem = async (userId, itemId, quantity) => {
 
   const pool = await poolPromise;
 
-  const itemResult = await pool
-    .request()
-    .input("itemId", sql.UniqueIdentifier, itemId)
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [itemRows] = await pool.execute(
+    `
       SELECT
         ci.id,
         ci.variant_id,
         ci.product_id
-      FROM dbo.cart_items ci
-      INNER JOIN dbo.carts c
+      FROM cart_items ci
+      INNER JOIN carts c
         ON ci.cart_id = c.id
-      WHERE ci.id = @itemId
-        AND c.user_id = @userId
-    `);
+      WHERE ci.id = ?
+        AND c.user_id = ?
+      LIMIT 1
+    `,
+    [itemId, userId]
+  );
 
-  if (itemResult.recordset.length === 0) {
+  if (itemRows.length === 0) {
     throw new Error("Cart item not found.");
   }
 
-  const item = itemResult.recordset[0];
+  const item = itemRows[0];
 
   // Check variant inventory
-  const variantResult = await pool
-    .request()
-    .input("variantId", sql.UniqueIdentifier, item.variant_id)
-    .query(`
+  const [variantRows] = await pool.execute(
+    `
       SELECT inventory
-      FROM dbo.product_variants
-      WHERE id = @variantId
-    `);
+      FROM product_variants
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [item.variant_id]
+  );
 
-  if (variantResult.recordset.length === 0) {
+  if (variantRows.length === 0) {
     throw new Error("Product variant not found.");
   }
 
-  if (variantResult.recordset[0].inventory < quantity) {
+  if (variantRows[0].inventory < quantity) {
     throw new Error("Insufficient variant inventory.");
   }
 
-  await pool
-    .request()
-    .input("itemId", sql.UniqueIdentifier, itemId)
-    .input("quantity", sql.Int, quantity)
-    .query(`
-      UPDATE dbo.cart_items
+  await pool.execute(
+    `
+      UPDATE cart_items
       SET
-        quantity = @quantity,
-        updated_at = SYSUTCDATETIME()
-      WHERE id = @itemId
-    `);
+        quantity = ?,
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
+    `,
+    [quantity, itemId]
+  );
 
   return getCart(userId);
 };
@@ -392,22 +395,31 @@ const updateCartItem = async (userId, itemId, quantity) => {
 const removeCartItem = async (userId, itemId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("itemId", sql.UniqueIdentifier, itemId)
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
-      DELETE ci
-      FROM dbo.cart_items ci
-      INNER JOIN dbo.carts c
+  // First verify item belongs to user's cart
+  const [itemRows] = await pool.execute(
+    `
+      SELECT ci.id
+      FROM cart_items ci
+      INNER JOIN carts c
         ON ci.cart_id = c.id
-      WHERE ci.id = @itemId
-        AND c.user_id = @userId
-    `);
+      WHERE ci.id = ?
+        AND c.user_id = ?
+      LIMIT 1
+    `,
+    [itemId, userId]
+  );
 
-  if (result.rowsAffected[0] === 0) {
+  if (itemRows.length === 0) {
     throw new Error("Cart item not found.");
   }
+
+  await pool.execute(
+    `
+      DELETE FROM cart_items
+      WHERE id = ?
+    `,
+    [itemId]
+  );
 
   return getCart(userId);
 };
@@ -416,31 +428,32 @@ const removeCartItem = async (userId, itemId) => {
 const clearCart = async (userId) => {
   const pool = await poolPromise;
 
-  const cartResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [cartRows] = await pool.execute(
+    `
       SELECT id
-      FROM dbo.carts
-      WHERE user_id = @userId
-    `);
+      FROM carts
+      WHERE user_id = ?
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (cartResult.recordset.length === 0) {
+  if (cartRows.length === 0) {
     return {
       cart: null,
       items: [],
     };
   }
 
-  const cartId = cartResult.recordset[0].id;
+  const cartId = cartRows[0].id;
 
-  await pool
-    .request()
-    .input("cartId", sql.UniqueIdentifier, cartId)
-    .query(`
-      DELETE FROM dbo.cart_items
-      WHERE cart_id = @cartId
-    `);
+  await pool.execute(
+    `
+      DELETE FROM cart_items
+      WHERE cart_id = ?
+    `,
+    [cartId]
+  );
 
   return getCart(userId);
 };
@@ -450,55 +463,56 @@ const updateCartCoupon = async (userId, couponCode) => {
   const pool = await poolPromise;
 
   // Find customer's cart
-  const cartResult = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [cartRows] = await pool.execute(
+    `
       SELECT id
-      FROM dbo.carts
-      WHERE user_id = @userId
-    `);
+      FROM carts
+      WHERE user_id = ?
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (cartResult.recordset.length === 0) {
+  if (cartRows.length === 0) {
     throw new Error("Cart not found.");
   }
 
-  const cartId = cartResult.recordset[0].id;
+  const cartId = cartRows[0].id;
 
   // Remove coupon
   if (!couponCode) {
-    await pool
-      .request()
-      .input("cartId", sql.UniqueIdentifier, cartId)
-      .query(`
-        UPDATE dbo.carts
+    await pool.execute(
+      `
+        UPDATE carts
         SET
           coupon_code = NULL,
-          updated_at = SYSUTCDATETIME()
-        WHERE id = @cartId
-      `);
+          updated_at = UTC_TIMESTAMP(6)
+        WHERE id = ?
+      `,
+      [cartId]
+    );
 
     return getCart(userId);
   }
 
   // Get cart items for subtotal
-  const itemsResult = await pool
-    .request()
-    .input("cartId", sql.UniqueIdentifier, cartId)
-    .query(`
+  const [itemRows] = await pool.execute(
+    `
       SELECT
         quantity,
         price_snapshot
-      FROM dbo.cart_items
-      WHERE cart_id = @cartId
-    `);
+      FROM cart_items
+      WHERE cart_id = ?
+    `,
+    [cartId]
+  );
 
-  if (itemsResult.recordset.length === 0) {
+  if (itemRows.length === 0) {
     throw new Error("Cart is empty.");
   }
 
   // Calculate subtotal
-  const subtotal = itemsResult.recordset.reduce(
+  const subtotal = itemRows.reduce(
     (total, item) =>
       total +
       Number(item.price_snapshot) * Number(item.quantity),
@@ -511,22 +525,20 @@ const updateCartCoupon = async (userId, couponCode) => {
     subtotal
   );
 
+  const normalizedCouponCode =
+    couponCode.trim().toUpperCase();
+
   // Save valid coupon
-  await pool
-    .request()
-    .input("cartId", sql.UniqueIdentifier, cartId)
-    .input(
-      "couponCode",
-      sql.NVarChar(100),
-      couponCode.trim().toUpperCase()
-    )
-    .query(`
-      UPDATE dbo.carts
+  await pool.execute(
+    `
+      UPDATE carts
       SET
-        coupon_code = @couponCode,
-        updated_at = SYSUTCDATETIME()
-      WHERE id = @cartId
-    `);
+        coupon_code = ?,
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
+    `,
+    [normalizedCouponCode, cartId]
+  );
 
   const cart = await getCart(userId);
 

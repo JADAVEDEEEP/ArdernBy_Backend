@@ -1,5 +1,5 @@
 const { randomUUID } = require("crypto");
-const { sql, poolPromise } = require("../config/sql");
+const { poolPromise } = require("../config/sql");
 
 const createCoupon = async (data) => {
   const {
@@ -24,81 +24,95 @@ const createCoupon = async (data) => {
 
   const pool = await poolPromise;
 
-  const existing = await pool
-    .request()
-    .input("code", sql.NVarChar(100), code.trim().toUpperCase())
-    .query(`
-      SELECT id
-      FROM dbo.coupons
-      WHERE code = @code
-    `);
+  const normalizedCode = code.trim().toUpperCase();
 
-  if (existing.recordset.length > 0) {
+  // Check duplicate coupon code
+  const [existingRows] = await pool.execute(
+    `
+      SELECT id
+      FROM coupons
+      WHERE code = ?
+      LIMIT 1
+    `,
+    [normalizedCode]
+  );
+
+  if (existingRows.length > 0) {
     throw new Error("Coupon code already exists.");
   }
 
   const id = randomUUID();
 
-const result = await pool
-  .request()
-  .input("id", sql.NVarChar(100), id)
-  .input("code", sql.NVarChar(100), code.trim().toUpperCase())
-  .input("description", sql.NVarChar(sql.MAX), description)
-  .input("discount_type", sql.NVarChar(20), discount_type)
-  .input("discount_value", sql.Decimal(10, 2), discount_value)
-  .input("min_order", sql.Decimal(10, 2), min_order)
-  .input(
-    "max_discount",
-    sql.Decimal(10, 2),
-    max_discount === null ? null : max_discount
-  )
-  .input("expiry", sql.DateTime2, expiry)
-  .input("active", sql.Bit, active)
-  .query(`
-    INSERT INTO dbo.coupons
-    (
+  // Insert coupon
+  await pool.execute(
+    `
+      INSERT INTO coupons
+      (
+        id,
+        code,
+        description,
+        discount_type,
+        discount_value,
+        min_order,
+        max_discount,
+        expiry,
+        active,
+        created_at
+      )
+      VALUES
+      (
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        ?,
+        UTC_TIMESTAMP(6)
+      )
+    `,
+    [
       id,
-      code,
+      normalizedCode,
       description,
       discount_type,
       discount_value,
       min_order,
-      max_discount,
+      max_discount === null ? null : max_discount,
       expiry,
-      active,
-      created_at
-    )
-    OUTPUT INSERTED.*
-    VALUES
-    (
-      @id,
-      @code,
-      @description,
-      @discount_type,
-      @discount_value,
-      @min_order,
-      @max_discount,
-      @expiry,
-      @active,
-      GETDATE()
-    )
-  `);
-  return result.recordset[0];
-};
+      active ? 1 : 0,
+    ]
+  );
 
+  // Return inserted coupon
+  const [rows] = await pool.execute(
+    `
+      SELECT *
+      FROM coupons
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [id]
+  );
+
+  return rows[0];
+};
 
 const getCoupons = async () => {
   const pool = await poolPromise;
 
-  const result = await pool.request().query(`
-    SELECT *
-    FROM dbo.coupons
-    ORDER BY created_at DESC
-  `);
+  const [rows] = await pool.execute(
+    `
+      SELECT *
+      FROM coupons
+      ORDER BY created_at DESC
+    `
+  );
 
-  return result.recordset;
+  return rows;
 };
-
 
 const getCouponByCode = async (code) => {
   if (!code) {
@@ -107,22 +121,24 @@ const getCouponByCode = async (code) => {
 
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("code", sql.NVarChar(100), code.trim().toUpperCase())
-    .query(`
-      SELECT *
-      FROM dbo.coupons
-      WHERE code = @code
-    `);
+  const normalizedCode = code.trim().toUpperCase();
 
-  if (result.recordset.length === 0) {
+  const [rows] = await pool.execute(
+    `
+      SELECT *
+      FROM coupons
+      WHERE code = ?
+      LIMIT 1
+    `,
+    [normalizedCode]
+  );
+
+  if (rows.length === 0) {
     throw new Error("Coupon not found.");
   }
 
-  return result.recordset[0];
+  return rows[0];
 };
-
 
 const updateCoupon = async (id, data) => {
   const {
@@ -137,61 +153,80 @@ const updateCoupon = async (id, data) => {
 
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-  .input("id", sql.NVarChar(100), id)
-    .input("description", sql.NVarChar(sql.MAX), description)
-    .input("discount_type", sql.NVarChar(20), discount_type)
-    .input("discount_value", sql.Decimal(10, 2), discount_value)
-    .input("min_order", sql.Decimal(10, 2), min_order)
-    .input(
-      "max_discount",
-      sql.Decimal(10, 2),
-      max_discount === null ? null : max_discount
-    )
-    .input("expiry", sql.DateTime2, expiry)
-    .input("active", sql.Bit, active)
-    .query(`
-      UPDATE dbo.coupons
+  const [result] = await pool.execute(
+    `
+      UPDATE coupons
       SET
-        description = @description,
-        discount_type = @discount_type,
-        discount_value = @discount_value,
-        min_order = @min_order,
-        max_discount = @max_discount,
-        expiry = @expiry,
-        active = @active
-      OUTPUT INSERTED.*
-      WHERE id = @id
-    `);
+        description = ?,
+        discount_type = ?,
+        discount_value = ?,
+        min_order = ?,
+        max_discount = ?,
+        expiry = ?,
+        active = ?
+      WHERE id = ?
+    `,
+    [
+      description,
+      discount_type,
+      discount_value,
+      min_order,
+      max_discount === null ? null : max_discount,
+      expiry,
+      active ? 1 : 0,
+      id,
+    ]
+  );
 
-  if (result.recordset.length === 0) {
+  if (result.affectedRows === 0) {
     throw new Error("Coupon not found.");
   }
 
-  return result.recordset[0];
-};
+  // Return updated coupon
+  const [rows] = await pool.execute(
+    `
+      SELECT *
+      FROM coupons
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [id]
+  );
 
+  return rows[0];
+};
 
 const deleteCoupon = async (id) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-   .input("id", sql.NVarChar(100), id)
-    .query(`
-      DELETE FROM dbo.coupons
-      OUTPUT DELETED.*
-      WHERE id = @id
-    `);
+  // Fetch first because MySQL doesn't support
+  // SQL Server's OUTPUT DELETED.*
+  const [rows] = await pool.execute(
+    `
+      SELECT *
+      FROM coupons
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [id]
+  );
 
-  if (result.recordset.length === 0) {
+  if (rows.length === 0) {
     throw new Error("Coupon not found.");
   }
 
-  return result.recordset[0];
-};
+  const deletedCoupon = rows[0];
 
+  await pool.execute(
+    `
+      DELETE FROM coupons
+      WHERE id = ?
+    `,
+    [id]
+  );
+
+  return deletedCoupon;
+};
 
 const validateCoupon = async (code, subtotal) => {
   const coupon = await getCouponByCode(code);
@@ -241,7 +276,6 @@ const validateCoupon = async (code, subtotal) => {
     total: subtotal - discount,
   };
 };
-
 
 module.exports = {
   createCoupon,

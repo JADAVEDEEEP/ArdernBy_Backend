@@ -1,4 +1,4 @@
-const { sql, poolPromise } = require("../config/sql");
+const { poolPromise } = require("../config/sql");
 
 const bcrypt = require("bcryptjs");
 
@@ -9,10 +9,8 @@ const bcrypt = require("bcryptjs");
 const getUserById = async (userId) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         id,
         full_name,
@@ -25,15 +23,18 @@ const getUserById = async (userId) => {
         is_active,
         created_at,
         updated_at
-      FROM dbo.profiles
-      WHERE id = @userId
-    `);
+      FROM profiles
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (result.recordset.length === 0) {
+  if (rows.length === 0) {
     throw new Error("User not found.");
   }
 
-  return result.recordset[0];
+  return rows[0];
 };
 
 // ==========================================
@@ -48,26 +49,26 @@ const updateUserProfile = async ({
 }) => {
   const pool = await poolPromise;
 
-  await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input("fullName", sql.VarChar(150), fullName || null)
-    .input("phone", sql.VarChar(30), phone || null)
-    .input("gender", sql.VarChar(20), gender || null)
-    .query(`
-      UPDATE dbo.profiles
+  await pool.execute(
+    `
+      UPDATE profiles
       SET
-        full_name = @fullName,
-        phone = @phone,
-        gender = @gender,
-        updated_at = SYSUTCDATETIME()
-      WHERE id = @userId;
-    `);
+        full_name = ?,
+        phone = ?,
+        gender = ?,
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
+    `,
+    [
+      fullName || null,
+      phone || null,
+      gender || null,
+      userId,
+    ]
+  );
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         id,
         full_name,
@@ -79,15 +80,18 @@ const updateUserProfile = async ({
         email_verified,
         is_active,
         updated_at
-      FROM dbo.profiles
-      WHERE id = @userId;
-    `);
+      FROM profiles
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (result.recordset.length === 0) {
+  if (rows.length === 0) {
     throw new Error("User not found.");
   }
 
-  return result.recordset[0];
+  return rows[0];
 };
 
 // ==========================================
@@ -101,23 +105,24 @@ const changePassword = async ({
 }) => {
   const pool = await poolPromise;
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         password_hash,
         auth_provider
-      FROM dbo.profiles
-      WHERE id = @userId
+      FROM profiles
+      WHERE id = ?
         AND is_active = 1
-    `);
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (result.recordset.length === 0) {
+  if (rows.length === 0) {
     throw new Error("User not found.");
   }
 
-  const user = result.recordset[0];
+  const user = rows[0];
 
   if (!user.password_hash) {
     throw new Error(
@@ -145,21 +150,19 @@ const changePassword = async ({
     12
   );
 
-  await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .input(
-      "passwordHash",
-      sql.VarChar(255),
-      newPasswordHash
-    )
-    .query(`
-      UPDATE dbo.profiles
+  await pool.execute(
+    `
+      UPDATE profiles
       SET
-        password_hash = @passwordHash,
-        updated_at = SYSUTCDATETIME()
-      WHERE id = @userId
-    `);
+        password_hash = ?,
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
+    `,
+    [
+      newPasswordHash,
+      userId,
+    ]
+  );
 
   return true;
 };
@@ -175,25 +178,26 @@ const deleteAccount = async ({ userId, password }) => {
   // GET ACTIVE USER
   // ==========================================
 
-  const result = await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
+  const [rows] = await pool.execute(
+    `
       SELECT
         id,
         email,
         password_hash,
         auth_provider
-      FROM dbo.profiles
-      WHERE id = @userId
+      FROM profiles
+      WHERE id = ?
         AND is_active = 1
-    `);
+      LIMIT 1
+    `,
+    [userId]
+  );
 
-  if (result.recordset.length === 0) {
+  if (rows.length === 0) {
     throw new Error("User not found.");
   }
 
-  const user = result.recordset[0];
+  const user = rows[0];
 
   // ==========================================
   // EMAIL/PASSWORD ACCOUNT
@@ -230,30 +234,26 @@ const deleteAccount = async ({ userId, password }) => {
   // Keep profile row for historical orders.
   // ==========================================
 
-  await pool
-    .request()
-    .input("userId", sql.UniqueIdentifier, userId)
-    .query(`
-      UPDATE dbo.profiles
+  await pool.execute(
+    `
+      UPDATE profiles
       SET
         full_name = NULL,
         phone = NULL,
-
         email = CONCAT(
           'deleted_',
-          CONVERT(varchar(36), id),
+          id,
           '@deleted.ardenby.local'
         ),
-
         password_hash = NULL,
         google_id = NULL,
         email_verified = 0,
         is_active = 0,
-
-        updated_at = SYSUTCDATETIME()
-
-      WHERE id = @userId;
-    `);
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
+    `,
+    [userId]
+  );
 
   return true;
 };
