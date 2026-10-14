@@ -276,7 +276,28 @@ const validateCoupon = async (code, subtotal) => {
     total: subtotal - discount,
   };
 };
+const getAvailableCoupons = async () => {
+  const pool = await poolPromise;
 
+  const [rows] = await pool.execute(`
+    SELECT
+      id,
+      code,
+      description,
+      discount_type,
+      discount_value,
+      min_order,
+      max_discount,
+      expiry,
+      active
+    FROM coupons
+    WHERE active = 1
+      AND expiry >= UTC_TIMESTAMP()
+    ORDER BY expiry ASC
+  `);
+
+  return rows;
+};
 module.exports = {
   createCoupon,
   getCoupons,
@@ -284,4 +305,5 @@ module.exports = {
   updateCoupon,
   deleteCoupon,
   validateCoupon,
+  getAvailableCoupons,
 };

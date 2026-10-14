@@ -32,23 +32,34 @@ const getCart = async (userId) => {
 
   const [itemRows] = await pool.execute(
     `
-      SELECT
-        id,
-        cart_id,
-        product_id,
-        variant_id,
-        product_name_snapshot,
-        image_snapshot,
-        size,
-        color,
-        quantity,
-        price_snapshot,
-        mrp_snapshot,
-        created_at,
-        updated_at
-      FROM cart_items
-      WHERE cart_id = ?
-      ORDER BY created_at ASC
+     SELECT
+  ci.id,
+  ci.cart_id,
+  ci.product_id,
+  ci.variant_id,
+  CASE
+  WHEN ci.product_name_snapshot IS NULL
+    OR ci.product_name_snapshot = ''
+    OR ci.product_name_snapshot = 'Product'
+  THEN p.name
+  ELSE ci.product_name_snapshot
+END AS product_name_snapshot,
+  COALESCE(ci.image_snapshot, pi.image_url) AS image_snapshot,
+  ci.size,
+  ci.color,
+  ci.quantity,
+  ci.price_snapshot,
+  ci.mrp_snapshot,
+  ci.created_at,
+  ci.updated_at
+FROM cart_items ci
+LEFT JOIN products p
+  ON p.id = ci.product_id
+LEFT JOIN product_images pi
+  ON pi.product_id = ci.product_id
+  AND pi.is_primary = 1
+WHERE ci.cart_id = ?
+ORDER BY ci.created_at ASC
     `,
     [cart.id]
   );

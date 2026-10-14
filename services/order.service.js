@@ -637,7 +637,7 @@ const cancelOrder = async (userId, orderId) => {
 const getAllOrders = async () => {
   const pool = await poolPromise;
 
-  const [rows] = await pool.execute(
+  const [orders] = await pool.execute(
     `
       SELECT
         id,
@@ -655,6 +655,7 @@ const getAllOrders = async () => {
         shipping_name,
         shipping_phone,
         shipping_pincode,
+        shipping_address,
         shipping_city,
         shipping_state,
         payment_order_id,
@@ -668,7 +669,72 @@ const getAllOrders = async () => {
     `
   );
 
-  return rows;
+  if (orders.length === 0) {
+    return [];
+  }
+
+  const orderIds = orders.map((order) => order.id);
+
+  const placeholders = orderIds.map(() => "?").join(", ");
+
+  const [items] = await pool.execute(
+    `
+      SELECT
+        id,
+        order_id,
+        product_id,
+        variant_id,
+        product_name,
+        product_image,
+        size,
+        color,
+        quantity,
+        unit_price,
+        unit_mrp,
+        created_at
+      FROM order_items
+      WHERE order_id IN (${placeholders})
+      ORDER BY created_at ASC
+    `,
+    orderIds
+  );
+
+  const itemsByOrder = {};
+
+  for (const item of items) {
+    if (!itemsByOrder[item.order_id]) {
+      itemsByOrder[item.order_id] = [];
+    }
+
+    itemsByOrder[item.order_id].push({
+      id: item.id,
+      product_id: item.product_id,
+      variant_id: item.variant_id,
+
+      product_name: item.product_name,
+      product_image: item.product_image,
+
+      size: item.size,
+      color: item.color,
+
+      quantity: Number(item.quantity || 0),
+
+      unit_price: Number(item.unit_price || 0),
+      unit_mrp: Number(item.unit_mrp || 0),
+
+      total:
+        Number(item.unit_price || 0) *
+        Number(item.quantity || 0),
+
+      created_at: item.created_at,
+    });
+  }
+
+  return orders.map((order) => ({
+    ...order,
+
+    items: itemsByOrder[order.id] || [],
+  }));
 };
 
 // ==========================================

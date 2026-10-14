@@ -21,6 +21,23 @@ const createCoupon = async (req, res) => {
   }
 };
 
+const getAvailableCoupons = async (req, res) => {
+  try {
+    const coupons = await couponService.getAvailableCoupons();
+
+    return res.status(200).json({
+      success: true,
+      coupons,
+    });
+  } catch (error) {
+    console.error("Get available coupons error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch available coupons.",
+    });
+  }
+};
 
 // GET ALL COUPONS
 const getCoupons = async (req, res) => {
@@ -140,4 +157,5 @@ module.exports = {
   updateCoupon,
   deleteCoupon,
   validateCoupon,
+  getAvailableCoupons,
 };

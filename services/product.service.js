@@ -522,6 +522,7 @@ const createProduct = async (product, files = []) => {
 // UPDATE PRODUCT
 // ==========================================
 
+
 const updateProduct = async (id, product, files = []) => {
   const pool = await poolPromise;
 
@@ -550,10 +551,6 @@ const updateProduct = async (id, product, files = []) => {
     variants,
   } = product;
 
-  // ==========================================
-  // PARSE VARIANTS
-  // ==========================================
-
   let parsedVariants = null;
 
   if (variants !== undefined) {
@@ -562,7 +559,7 @@ const updateProduct = async (id, product, files = []) => {
         typeof variants === "string"
           ? JSON.parse(variants)
           : variants;
-    } catch (error) {
+    } catch {
       throw new Error("Invalid variants JSON format.");
     }
 
@@ -571,17 +568,8 @@ const updateProduct = async (id, product, files = []) => {
     }
   }
 
-  // ==========================================
-  // CHECK PRODUCT
-  // ==========================================
-
   const [existingRows] = await pool.execute(
-    `
-      SELECT id
-      FROM products
-      WHERE id = ?
-      LIMIT 1
-    `,
+    "SELECT id FROM products WHERE id = ? LIMIT 1",
     [id]
   );
 
@@ -589,14 +577,9 @@ const updateProduct = async (id, product, files = []) => {
     throw new Error("Product not found.");
   }
 
-  // ==========================================
-  // UPDATE PRODUCT DETAILS
-  // ==========================================
-
   await pool.execute(
     `
-      UPDATE products
-      SET
+      UPDATE products SET
         slug = ?,
         name = ?,
         category_slug = ?,
@@ -647,40 +630,26 @@ const updateProduct = async (id, product, files = []) => {
     ]
   );
 
-  // ==========================================
-  // UPDATE IMAGES
-  // ONLY IF NEW FILES PROVIDED
-  // ==========================================
-
+  // Update images only when new files are provided.
   if (files.length > 0) {
     const [oldImages] = await pool.execute(
-      `
-        SELECT image_url
-        FROM product_images
-        WHERE product_id = ?
-      `,
+      "SELECT image_url FROM product_images WHERE product_id = ?",
       [id]
     );
-
-    // ------------------------------------------
-    // DELETE OLD CLOUDINARY IMAGES
-    // ------------------------------------------
 
     for (const image of oldImages) {
       try {
         const url = image.image_url;
-
         const uploadIndex = url.indexOf("/upload/");
 
         if (uploadIndex !== -1) {
           let publicId = url.substring(uploadIndex + 8);
-
           publicId = publicId.replace(/^v\d+\//, "");
 
-          publicId = publicId.substring(
-            0,
-            publicId.lastIndexOf(".")
-          );
+          const extensionIndex = publicId.lastIndexOf(".");
+          if (extensionIndex !== -1) {
+            publicId = publicId.substring(0, extensionIndex);
+          }
 
           await deleteProductImage(publicId);
         }
@@ -692,52 +661,24 @@ const updateProduct = async (id, product, files = []) => {
       }
     }
 
-    // ------------------------------------------
-    // DELETE OLD IMAGE RECORDS
-    // ------------------------------------------
-
     await pool.execute(
-      `
-        DELETE FROM product_images
-        WHERE product_id = ?
-      `,
+      "DELETE FROM product_images WHERE product_id = ?",
       [id]
     );
-
-    // ------------------------------------------
-    // UPLOAD NEW IMAGES
-    // ------------------------------------------
 
     const uploadedImages = await uploadProductImages(files);
 
     for (let i = 0; i < uploadedImages.length; i++) {
-      const image = uploadedImages[i];
-
       await pool.execute(
         `
           INSERT INTO product_images
-          (
-            id,
-            product_id,
-            image_url,
-            sort_order,
-            is_primary,
-            created_at
-          )
-          VALUES
-          (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            UTC_TIMESTAMP(6)
-          )
+            (id, product_id, image_url, sort_order, is_primary, created_at)
+          VALUES (?, ?, ?, ?, ?, UTC_TIMESTAMP(6))
         `,
         [
           randomUUID(),
           id,
-          image.url,
+          uploadedImages[i].url,
           i,
           i === 0 ? 1 : 0,
         ]
@@ -745,78 +686,124 @@ const updateProduct = async (id, product, files = []) => {
     }
   }
 
-  // ==========================================
-  // UPDATE VARIANTS
-  // ONLY IF VARIANTS FIELD IS PROVIDED
-  // ==========================================
-
+  // Update variants without replacing existing IDs.
   if (parsedVariants !== null) {
-    // ------------------------------------------
-    // DELETE OLD VARIANTS
-    // ------------------------------------------
-
-    await pool.execute(
+    const [existingVariants] = await pool.execute(
       `
-        DELETE FROM product_variants
+        SELECT id, size, color
+        FROM product_variants
         WHERE product_id = ?
       `,
       [id]
     );
 
-    // ------------------------------------------
-    // CREATE NEW VARIANTS
-    // ------------------------------------------
+    const processedIds = new Set();
 
     for (const variant of parsedVariants) {
       if (
         !variant.size ||
         !variant.color ||
-        variant.inventory === undefined
+        variant.inventory === undefined ||
+        !Number.isFinite(Number(variant.inventory)) ||
+        Number(variant.inventory) < 0
       ) {
         throw new Error(
-          "Each variant requires size, color and inventory."
+          "Each variant requires size, color and valid inventory."
         );
       }
 
-      await pool.execute(
-        `
-          INSERT INTO product_variants
-          (
+      let existing = variant.id
+        ? existingVariants.find(
+            (item) =>
+              String(item.id) === String(variant.id) &&
+              !processedIds.has(String(item.id))
+          )
+        : null;
+
+      if (!existing) {
+        existing = existingVariants.find(
+          (item) =>
+            String(item.size).toLowerCase() ===
+              String(variant.size).toLowerCase() &&
+            String(item.color).toLowerCase() ===
+              String(variant.color).toLowerCase() &&
+            !processedIds.has(String(item.id))
+        );
+      }
+
+      if (existing) {
+        await pool.execute(
+          `
+            UPDATE product_variants SET
+              size = ?,
+              color = ?,
+              inventory = ?,
+              sku = ?,
+              updated_at = UTC_TIMESTAMP(6)
+            WHERE id = ? AND product_id = ?
+          `,
+          [
+            variant.size,
+            variant.color,
+            Number(variant.inventory),
+            variant.sku || null,
+            existing.id,
             id,
-            product_id,
-            size,
-            color,
-            inventory,
-            sku,
-            created_at,
-            updated_at
-          )
-          VALUES
-          (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            UTC_TIMESTAMP(6),
-            UTC_TIMESTAMP(6)
-          )
+          ]
+        );
+
+        processedIds.add(String(existing.id));
+      } else {
+        await pool.execute(
+          `
+            INSERT INTO product_variants
+              (id, product_id, size, color, inventory, sku,
+               created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+          `,
+          [
+            randomUUID(),
+            id,
+            variant.size,
+            variant.color,
+            Number(variant.inventory),
+            variant.sku || null,
+          ]
+        );
+      }
+    }
+
+    // Delete omitted variants only if no order references them.
+    for (const existing of existingVariants) {
+      if (processedIds.has(String(existing.id))) {
+        continue;
+      }
+
+      const [orderRows] = await pool.execute(
+        `
+          SELECT 1
+          FROM order_items
+          WHERE variant_id = ?
+          LIMIT 1
         `,
-        [
-          randomUUID(),
-          id,
-          variant.size,
-          variant.color,
-          Number(variant.inventory),
-          variant.sku || null,
-        ]
+        [existing.id]
       );
+
+      if (orderRows.length === 0) {
+        await pool.execute(
+          `
+            DELETE FROM product_variants
+            WHERE id = ? AND product_id = ?
+          `,
+          [existing.id, id]
+        );
+      }
     }
   }
 
   return getProductBySlug(slug);
 };
+
 
 // ==========================================
 // DELETE PRODUCT

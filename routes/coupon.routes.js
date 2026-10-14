@@ -7,6 +7,7 @@ const {
   updateCoupon,
   deleteCoupon,
   validateCoupon,
+  getAvailableCoupons,
 } = require("../controller/coupon.controller");
 
 const { authenticateToken } = require("../middleware/auth.middleware");
@@ -31,6 +32,12 @@ couponRouter.get(
   getCoupons
 );
 
+couponRouter.get(
+  "/available",
+  authenticateToken,
+  authorizeRoles("customer", "admin", "superadmin"),
+  getAvailableCoupons
+);
 
 couponRouter.get(
   "/:code",
