@@ -1,4 +1,5 @@
 const userService = require("../services/user.service");
+const { publicMessage } = require("../utils/public-error");
 
 // ==========================================
 // GET CURRENT USER
@@ -17,7 +18,7 @@ const getMe = async (req, res) => {
 
     return res.status(404).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -51,7 +52,7 @@ const updateProfile = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -100,7 +101,7 @@ const changePassword = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -127,7 +128,7 @@ const deleteAccount = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };

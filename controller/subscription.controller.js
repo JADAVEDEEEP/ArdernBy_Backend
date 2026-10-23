@@ -1,4 +1,5 @@
 const subscriptionService = require("../services/subscription.service");
+const { publicMessage } = require("../utils/public-error");
 
 // ==========================================
 // GET ALL PLANS
@@ -18,7 +19,7 @@ const getPlans = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -42,7 +43,7 @@ const getPlanById = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -70,7 +71,7 @@ const getMySubscription = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -111,7 +112,7 @@ const createSubscription = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -151,7 +152,7 @@ const activateSubscription = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -191,7 +192,7 @@ const cancelSubscription = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -222,7 +223,7 @@ const checkActiveSubscription = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };

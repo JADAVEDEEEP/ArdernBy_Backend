@@ -1,4 +1,5 @@
 const productService = require("../services/product.service");
+const { publicMessage } = require("../utils/public-error");
 
 // ==========================================
 // GET ALL PRODUCTS
@@ -13,11 +14,15 @@ const getProducts = async (req, res) => {
       category,
     } = req.query;
 
+    // Bounded paging: an unbounded `limit` would let anyone dump / stall the catalogue.
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+    const safePage = Math.min(Math.max(parseInt(page, 10) || 1, 1), 10000);
+
     const result = await productService.getAllProducts({
-      page: Number(page),
-      limit: Number(limit),
-      search,
-      category,
+      page: safePage,
+      limit: safeLimit,
+      search: typeof search === "string" ? search.slice(0, 100) : undefined,
+      category: typeof category === "string" ? category.slice(0, 100) : undefined,
     });
 
     return res.status(200).json({
@@ -55,7 +60,7 @@ const getProduct = async (req, res) => {
 
     return res.status(404).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -81,7 +86,7 @@ const createProduct = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -110,7 +115,7 @@ const updateProduct = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -134,7 +139,7 @@ const deleteProduct = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };

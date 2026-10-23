@@ -1,6 +1,74 @@
 const { randomUUID } = require("crypto");
 const { poolPromise } = require("../config/sql");
 const couponService = require("./coupon.service");
+const { calculateOrderTotals } = require("../utils/pricing");
+
+const INSUFFICIENT_STOCK_MESSAGE = "Insufficient variant inventory.";
+
+// Single variant-level stock rules shared by guest checks, add and update.
+const assertQuantity = (quantity) => {
+  const value = Number(quantity);
+
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("Quantity must be a whole number greater than 0.");
+  }
+
+  return value;
+};
+
+const assertVariantStock = (variant, requestedQuantity) => {
+  if (Number(variant.inventory) < requestedQuantity) {
+    throw new Error(INSUFFICIENT_STOCK_MESSAGE);
+  }
+};
+
+// Stock check for guests (no server cart). Each entry carries the TOTAL
+// quantity wanted for that variant; the rule is identical to add/update.
+const checkVariantStock = async (entries) => {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error("items are required.");
+  }
+
+  const pool = await poolPromise;
+  const results = [];
+
+  for (const entry of entries) {
+    const variantId = entry?.variant_id;
+    const productId = entry?.product_id;
+    const quantity = assertQuantity(entry?.quantity);
+
+    if (!variantId || !productId) {
+      throw new Error("variant_id and product_id are required.");
+    }
+
+    const [rows] = await pool.execute(
+      `
+        SELECT id, inventory
+        FROM product_variants
+        WHERE id = ?
+          AND product_id = ?
+        LIMIT 1
+      `,
+      [variantId, productId]
+    );
+
+    if (rows.length === 0) {
+      throw new Error("Product variant not found.");
+    }
+
+    const available = Math.max(0, Number(rows[0].inventory));
+
+    results.push({
+      variant_id: variantId,
+      product_id: productId,
+      requested: quantity,
+      available,
+      ok: available >= quantity,
+    });
+  }
+
+  return results;
+};
 
 // GET USER CART
 const getCart = async (userId) => {
@@ -149,9 +217,7 @@ const addCartItem = async (userId, item) => {
     );
   }
 
-  if (quantity <= 0) {
-    throw new Error("Quantity must be greater than 0.");
-  }
+  const requestedQuantity = assertQuantity(quantity);
 
   const pool = await poolPromise;
 
@@ -221,9 +287,7 @@ const addCartItem = async (userId, item) => {
   const variant = variantRows[0];
 
   // Check inventory
-  if (variant.inventory < quantity) {
-    throw new Error("Insufficient variant inventory.");
-  }
+  assertVariantStock(variant, requestedQuantity);
 
   // Check existing cart item
   const [existingItemRows] = await pool.execute(
@@ -244,11 +308,9 @@ const addCartItem = async (userId, item) => {
   if (existingItemRows.length > 0) {
     const existing = existingItemRows[0];
 
-    const newQuantity = existing.quantity + quantity;
+    const newQuantity = existing.quantity + requestedQuantity;
 
-    if (variant.inventory < newQuantity) {
-      throw new Error("Insufficient variant inventory.");
-    }
+    assertVariantStock(variant, newQuantity);
 
     await pool.execute(
       `
@@ -330,7 +392,7 @@ const addCartItem = async (userId, item) => {
       imageSnapshot,
       variant.size,
       variant.color,
-      quantity,
+      requestedQuantity,
       product.price,
       product.mrp,
     ]
@@ -341,9 +403,7 @@ const addCartItem = async (userId, item) => {
 
 // UPDATE CART ITEM
 const updateCartItem = async (userId, itemId, quantity) => {
-  if (!quantity || quantity <= 0) {
-    throw new Error("Quantity must be greater than 0.");
-  }
+  const requestedQuantity = assertQuantity(quantity);
 
   const pool = await poolPromise;
 
@@ -384,9 +444,7 @@ const updateCartItem = async (userId, itemId, quantity) => {
     throw new Error("Product variant not found.");
   }
 
-  if (variantRows[0].inventory < quantity) {
-    throw new Error("Insufficient variant inventory.");
-  }
+  assertVariantStock(variantRows[0], requestedQuantity);
 
   await pool.execute(
     `
@@ -396,7 +454,7 @@ const updateCartItem = async (userId, itemId, quantity) => {
         updated_at = UTC_TIMESTAMP(6)
       WHERE id = ?
     `,
-    [quantity, itemId]
+    [requestedQuantity, itemId]
   );
 
   return getCart(userId);
@@ -462,6 +520,18 @@ const clearCart = async (userId) => {
     `
       DELETE FROM cart_items
       WHERE cart_id = ?
+    `,
+    [cartId]
+  );
+
+  // An emptied cart must not keep its coupon for the next order.
+  await pool.execute(
+    `
+      UPDATE carts
+      SET
+        coupon_code = NULL,
+        updated_at = UTC_TIMESTAMP(6)
+      WHERE id = ?
     `,
     [cartId]
   );
@@ -537,7 +607,7 @@ const updateCartCoupon = async (userId, couponCode) => {
   );
 
   const normalizedCouponCode =
-    couponCode.trim().toUpperCase();
+    String(couponCode).trim().toUpperCase();
 
   // Save valid coupon
   await pool.execute(
@@ -553,11 +623,17 @@ const updateCartCoupon = async (userId, couponCode) => {
 
   const cart = await getCart(userId);
 
+  // Same totals the order uses: GST on (subtotal - discount), shipping on subtotal.
+  const totals = calculateOrderTotals(subtotal, couponResult.discount);
+
   return {
     ...cart,
-    subtotal: couponResult.subtotal,
-    discount: couponResult.discount,
-    total: couponResult.total,
+    subtotal: totals.subtotal,
+    discount: totals.discountAmount,
+    taxableAmount: totals.taxableAmount,
+    shipping: totals.shippingAmount,
+    tax: totals.taxAmount,
+    total: totals.totalAmount,
   };
 };
 
@@ -569,4 +645,5 @@ module.exports = {
   removeCartItem,
   clearCart,
   updateCartCoupon,
+  checkVariantStock,
 };

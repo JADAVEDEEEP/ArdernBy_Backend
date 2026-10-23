@@ -1,4 +1,5 @@
 const addressService = require("../services/address.service");
+const { publicMessage } = require("../utils/public-error");
 
 // ==========================================
 // GET ALL ADDRESSES
@@ -20,7 +21,7 @@ const getAddresses = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -48,7 +49,7 @@ const getAddressById = async (req, res) => {
 
     return res.status(404).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -110,7 +111,7 @@ const createAddress = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -161,7 +162,7 @@ const updateAddress = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -191,7 +192,7 @@ const deleteAddress = async (req, res) => {
 
     return res.status(404).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -224,7 +225,7 @@ const setDefaultAddress = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };

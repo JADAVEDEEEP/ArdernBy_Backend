@@ -1,4 +1,14 @@
 const authService = require("../services/auth.service");
+const { publicMessage } = require("../utils/public-error");
+
+// Body fields must be plain strings: objects/arrays (e.g. {"$ne": ""}) are
+// rejected before they reach the service layer.
+const isString = (value, max = 254) =>
+  typeof value === "string" && value.length > 0 && value.length <= max;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isEmail = (value) => isString(value) && EMAIL_PATTERN.test(value.trim());
+const invalid = (res, message = "Invalid request.") =>
+  res.status(400).json({ success: false, message });
 
 // ==========================================
 // AUTH — LOGIN OR REGISTER
@@ -18,6 +28,15 @@ const authenticate = async (req, res) => {
         success: false,
         message: "Email and password are required.",
       });
+    }
+
+    if (
+      !isEmail(email) ||
+      !isString(password, 128) ||
+      (fullName != null && !isString(fullName, 120)) ||
+      (phone != null && !isString(phone, 20))
+    ) {
+      return invalid(res, "Please check your details and try again.");
     }
 
     if (password.length < 8) {
@@ -50,7 +69,7 @@ const authenticate = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -73,6 +92,10 @@ const verifyOTP = async (req, res) => {
         message:
           "Email, OTP and purpose are required.",
       });
+    }
+
+    if (!isEmail(email) || typeof otp !== "string" || typeof purpose !== "string") {
+      return invalid(res);
     }
 
     if (!/^\d{6}$/.test(otp)) {
@@ -120,7 +143,7 @@ const verifyOTP = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -140,6 +163,10 @@ const forgotPassword = async (req, res) => {
       });
     }
 
+    if (!isEmail(email)) {
+      return invalid(res, "Enter a valid email address.");
+    }
+
     const result =
       await authService.requestPasswordReset(
         email.trim().toLowerCase()
@@ -157,7 +184,7 @@ const forgotPassword = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -180,6 +207,10 @@ const resetPassword = async (req, res) => {
         message:
           "Reset token and new password are required.",
       });
+    }
+
+    if (!isString(resetToken, 2000) || !isString(newPassword, 128)) {
+      return invalid(res);
     }
 
     if (newPassword.length < 8) {
@@ -208,7 +239,7 @@ const resetPassword = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -231,6 +262,14 @@ const resendOTP = async (req, res) => {
         message:
           "Email and OTP purpose are required.",
       });
+    }
+
+    if (
+      !isEmail(email) ||
+      typeof purpose !== "string" ||
+      (userId != null && typeof userId !== "string")
+    ) {
+      return invalid(res);
     }
 
     if (
@@ -265,7 +304,7 @@ const resendOTP = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -284,6 +323,10 @@ const googleLogin = async (req, res) => {
         message:
           "Google credential is required.",
       });
+    }
+
+    if (!isString(credential, 4000)) {
+      return invalid(res);
     }
 
     const result =
@@ -305,7 +348,7 @@ const googleLogin = async (req, res) => {
 
     return res.status(401).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };

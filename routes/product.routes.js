@@ -1,7 +1,7 @@
 const express = require("express");
 
 const upload = require("../middleware/upload.middleware");
-
+const { verifyImageSignatures } = upload;
 const {
   getProducts,
   getProduct,
@@ -65,6 +65,7 @@ productrouter.post(
   authenticateToken,
   authorizeRoles("admin", "superadmin"),
   upload.array("images", 6),
+  verifyImageSignatures,
   createProduct
 );
 
@@ -78,6 +79,7 @@ productrouter.put(
   authenticateToken,
   authorizeRoles("admin", "superadmin"),
   upload.array("images", 6),
+  verifyImageSignatures,
   updateProduct
 );
 

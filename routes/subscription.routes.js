@@ -74,11 +74,15 @@ subscriptionRouter.patch(
 // PAYMENT / ACTIVATION
 // ==========================================
 
-// Activate subscription after successful payment
+// Activate subscription after payment has been confirmed.
+// Admin-only: a customer must never be able to activate a subscription (their
+// own or anyone else's) by claiming a payment id. Subscription checkout is not
+// wired to Razorpay yet; when it is, activation must happen server-side from a
+// verified payment, not from this endpoint.
 subscriptionRouter.patch(
   "/:subscriptionId/activate",
   authenticateToken,
-  authorizeRoles("customer"),
+  authorizeRoles("admin", "superadmin"),
   activateSubscription
 );
 

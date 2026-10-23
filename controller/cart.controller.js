@@ -1,4 +1,5 @@
 const cartService = require("../services/cart.service");
+const { publicMessage } = require("../utils/public-error");
 
 // GET CART
 const getCart = async (req, res) => {
@@ -21,6 +22,28 @@ const getCart = async (req, res) => {
   }
 };
 
+// GUEST STOCK CHECK (variant-level, no cart required)
+const checkStock = async (req, res) => {
+  try {
+    const results = await cartService.checkVariantStock(
+      req.body?.items
+    );
+
+    return res.status(200).json({
+      success: true,
+      ok: results.every((entry) => entry.ok),
+      items: results,
+    });
+  } catch (error) {
+    console.error("Stock check error:", error.message);
+
+    return res.status(400).json({
+      success: false,
+      message: publicMessage(error),
+    });
+  }
+};
+
 // CREATE CART
 const createCart = async (req, res) => {
   try {
@@ -38,7 +61,7 @@ const createCart = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -63,7 +86,7 @@ const addCartItem = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -91,7 +114,7 @@ const updateCartItem = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -117,7 +140,7 @@ const removeCartItem = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -139,7 +162,7 @@ const clearCart = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -167,7 +190,7 @@ const updateCartCoupon = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -180,4 +203,5 @@ module.exports = {
   removeCartItem,
   clearCart,
   updateCartCoupon,
+  checkStock,
 };

@@ -8,12 +8,16 @@ const {
   removeCartItem,
   clearCart,
   updateCartCoupon,
+  checkStock,
 } = require("../controller/cart.controller");
 
 const { authenticateToken } = require("../middleware/auth.middleware");
 const { authorizeRoles } = require("../middleware/role.middleware");
 
 const cartRouter = express.Router();
+
+// GUEST STOCK CHECK (public: guests have no account or server cart)
+cartRouter.post("/stock-check", checkStock);
 
 // GET CART
 cartRouter.get(

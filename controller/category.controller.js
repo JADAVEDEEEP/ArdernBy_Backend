@@ -1,4 +1,5 @@
 const categoryService = require("../services/category.service");
+const { publicMessage } = require("../utils/public-error");
 
 // GET ALL CATEGORIES
 const getCategories = async (req, res) => {
@@ -35,7 +36,7 @@ const getCategory = async (req, res) => {
 
     return res.status(404).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -55,7 +56,7 @@ const createCategory = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -80,7 +81,7 @@ const updateCategory = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -101,7 +102,7 @@ const deleteCategory = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };

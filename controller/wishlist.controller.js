@@ -1,4 +1,5 @@
 const wishlistService = require("../services/wishlist.service");
+const { publicMessage } = require("../utils/public-error");
 
 // ==========================================
 // GET WISHLIST
@@ -24,7 +25,7 @@ const getWishlist = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -64,7 +65,7 @@ const addToWishlist = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -104,7 +105,7 @@ const removeFromWishlist = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -144,7 +145,7 @@ const checkWishlist = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -173,7 +174,7 @@ const clearWishlist = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };

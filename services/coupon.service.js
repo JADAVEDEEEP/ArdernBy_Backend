@@ -1,5 +1,6 @@
 const { randomUUID } = require("crypto");
 const { poolPromise } = require("../config/sql");
+const { calculateCouponDiscount } = require("../utils/pricing");
 
 const createCoupon = async (data) => {
   const {
@@ -229,6 +230,10 @@ const deleteCoupon = async (id) => {
 };
 
 const validateCoupon = async (code, subtotal) => {
+  if (!Number.isFinite(subtotal) || subtotal <= 0) {
+    throw new Error("A valid cart subtotal is required.");
+  }
+
   const coupon = await getCouponByCode(code);
 
   const now = new Date();
@@ -247,27 +252,7 @@ const validateCoupon = async (code, subtotal) => {
     );
   }
 
-  let discount = 0;
-
-  if (coupon.discount_type === "percentage") {
-    discount =
-      (subtotal * Number(coupon.discount_value)) / 100;
-
-    if (
-      coupon.max_discount !== null &&
-      discount > Number(coupon.max_discount)
-    ) {
-      discount = Number(coupon.max_discount);
-    }
-  } else if (coupon.discount_type === "flat") {
-    discount = Number(coupon.discount_value);
-  } else {
-    throw new Error("Invalid discount type.");
-  }
-
-  if (discount > subtotal) {
-    discount = subtotal;
-  }
+  const discount = calculateCouponDiscount(coupon, subtotal);
 
   return {
     coupon,

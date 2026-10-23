@@ -263,6 +263,23 @@ const getProductBySlug = async (slug) => {
 // CREATE PRODUCT
 // ==========================================
 
+// Prices and stock written by the admin API must be real, non-negative numbers.
+const assertMoney = (value, label) => {
+  if (value === undefined || value === null || value === "") return;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > 10000000) {
+    throw new Error(`${label} must be a valid non-negative amount.`);
+  }
+};
+
+const assertStock = (value, label) => {
+  if (value === undefined || value === null || value === "") return;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 1000000) {
+    throw new Error(`${label} must be a whole number of 0 or more.`);
+  }
+};
+
 const createProduct = async (product, files = []) => {
   const pool = await poolPromise;
 
@@ -295,6 +312,11 @@ const createProduct = async (product, files = []) => {
   if (!id || !slug || !name) {
     throw new Error("Product id, slug and name are required.");
   }
+
+  assertMoney(price, "Price");
+  assertMoney(mrp, "MRP");
+  assertMoney(best_price, "Best price");
+  assertStock(inventory, "Inventory");
 
   // ==========================================
   // PARSE VARIANTS
@@ -479,6 +501,8 @@ const createProduct = async (product, files = []) => {
       );
     }
 
+    assertStock(variant.inventory, "Variant inventory");
+
     await pool.execute(
       `
         INSERT INTO product_variants
@@ -576,6 +600,11 @@ const updateProduct = async (id, product, files = []) => {
   if (existingRows.length === 0) {
     throw new Error("Product not found.");
   }
+
+  assertMoney(price, "Price");
+  assertMoney(mrp, "MRP");
+  assertMoney(best_price, "Best price");
+  assertStock(inventory, "Inventory");
 
   await pool.execute(
     `

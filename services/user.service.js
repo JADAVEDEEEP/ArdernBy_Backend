@@ -183,6 +183,7 @@ const deleteAccount = async ({ userId, password }) => {
       SELECT
         id,
         email,
+        role,
         password_hash,
         auth_provider
       FROM profiles
@@ -198,6 +199,12 @@ const deleteAccount = async ({ userId, password }) => {
   }
 
   const user = rows[0];
+
+  // A store admin account is never removed through the customer self-service
+  // endpoint (a stolen admin session must not be able to erase the account).
+  if (user.role !== "customer") {
+    throw new Error("This account cannot be deleted here.");
+  }
 
   // ==========================================
   // EMAIL/PASSWORD ACCOUNT

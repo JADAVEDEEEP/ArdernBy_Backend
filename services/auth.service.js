@@ -36,7 +36,8 @@ const generateToken = (user) => {
     },
     getJwtSecret(),
     {
-      expiresIn: "7d",
+      // Privileged sessions are shorter-lived than customer sessions.
+      expiresIn: ["admin", "superadmin"].includes(user.role) ? "24h" : "7d",
     }
   );
 };
@@ -726,6 +727,12 @@ const verifyUserOTP = async ({
     );
   }
 
+  if (!user.is_active) {
+    throw new Error(
+      "Your account is inactive."
+    );
+  }
+
   // ===================================================
   // PASSWORD RESET OTP
   // OTP VERIFIED → SHORT-LIVED RESET TOKEN
@@ -1153,6 +1160,13 @@ const googleLogin = async (credential) => {
     // =================================================
 
     if (!existingUser.is_active) {
+      // Only a customer who deleted their own account may be revived this way.
+      // A deactivated admin must be re-enabled by the store owner in the database.
+      if (existingUser.role !== "customer") {
+        throw new Error(
+          "Your account is inactive."
+        );
+      }
 
       const pool =
         await poolPromise;

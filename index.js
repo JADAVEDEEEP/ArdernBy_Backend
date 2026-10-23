@@ -1,45 +1,35 @@
-const express = require("express");
-const cors = require("cors");
-require('dotenv').config()
-const productRouter = require("./routes/product.routes");
-const userRouter = require("./routes/user.routes");
-const authRouter = require("./routes/auth.route");
-const categoryRouter = require("./routes/category.routes")
+require("dotenv").config();
+
+const app = require("./app");
 const { testDatabaseConnection } = require("./config/sql");
-const cartRouter = require("./routes/cart.routes");
-const couponRouter = require("./routes/coupon.routes");
-const addressRoutes = require("./routes/address.routes");
-const orderRoutes = require("./routes/order.routes");
-const wishlistRouter = require("./routes/wishlist.routes");
-const subscriptionRouter = require("./routes/subscription.routes");
-
-
-
-const app = express();
-
-app.use(cors());
-app.use(express.json());
+const {
+  releaseExpiredUnpaidOrders,
+  reconcilePendingRefunds,
+} = require("./services/order.service");
 
 // Database connection test
 testDatabaseConnection();
 
-// Routes
-app.use("/api/products", productRouter);
-app.use("/api/auth",authRouter)
-app.use("/api/users",userRouter)
-app.use("/api/categories",categoryRouter);
-app.use("/api/cart", cartRouter);
-app.use("/api/coupons", couponRouter);
-app.use("/api/wishlist", wishlistRouter);
-app.use("/api/subscriptions", subscriptionRouter);
-app.use("/api/addresses", addressRoutes);
-app.use("/api/orders", orderRoutes);
-
-app.get("/",(req,res)=>{
-  res.send("Welcome to ArdenBy API")
-})
-const PORT = 5000;
+const PORT = Number(process.env.PORT) || 5000;
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
+
+  // Unpaid online orders hold stock; give it back when payment is abandoned.
+  const sweep = () =>
+    releaseExpiredUnpaidOrders().catch((error) =>
+      console.error("Unpaid order sweep failed:", error.message)
+    );
+  setTimeout(sweep, 30 * 1000).unref();
+  setInterval(sweep, 10 * 60 * 1000).unref();
+
+  // Refunds Razorpay finished after we recorded them as Refund Pending are
+  // marked Refunded once Razorpay confirms (read-only on Razorpay; never creates
+  // a refund).
+  const reconcile = () =>
+    reconcilePendingRefunds().catch((error) =>
+      console.error("Refund reconcile failed:", error.message)
+    );
+  setTimeout(reconcile, 45 * 1000).unref();
+  setInterval(reconcile, 15 * 60 * 1000).unref();
 });

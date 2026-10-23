@@ -1,4 +1,5 @@
 const couponService = require("../services/coupon.service");
+const { publicMessage } = require("../utils/public-error");
 
 
 // CREATE COUPON
@@ -16,7 +17,7 @@ const createCoupon = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -75,7 +76,7 @@ const getCouponByCode = async (req, res) => {
 
     return res.status(404).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -99,7 +100,7 @@ const updateCoupon = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -119,7 +120,7 @@ const deleteCoupon = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
@@ -144,7 +145,7 @@ const validateCoupon = async (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message: publicMessage(error),
     });
   }
 };
