@@ -405,7 +405,58 @@ const syncPayment = async ({ userId, orderId }) => {
   };
 };
 
+// Razorpay webhook (payment.captured / order.paid). Covers a customer who paid
+// but never came back to the site. Everything is looked up and checked on the
+// server: the amount must equal the saved order total, and an order that is
+// already paid, refunded or not an online order is left alone, so repeated
+// deliveries of the same event are safe.
+const settleWebhookPayment = async ({ razorpayOrderId, paymentId, amountPaise }) => {
+  if (!razorpayOrderId || !paymentId) {
+    return { handled: false, reason: "missing_ids" };
+  }
+
+  const pool = await poolPromise;
+  const [rows] = await pool.execute(
+    `
+      SELECT ${ORDER_FIELDS}
+      FROM orders
+      WHERE payment_order_id = ?
+      LIMIT 1
+    `,
+    [razorpayOrderId]
+  );
+  const order = rows[0];
+
+  if (!order) return { handled: false, reason: "unknown_order" };
+  if (!isOnline(order)) return { handled: false, reason: "not_online" };
+  if (isPaid(order)) return { handled: true, outcome: "already_paid" };
+  if (hasRefundRecord(order)) return { handled: true, outcome: "refund_on_record" };
+
+  if (Number(amountPaise) !== razorpay.toPaise(order.total_amount)) {
+    return { handled: false, reason: "amount_mismatch" };
+  }
+
+  const outcome = await finalizePaidOrder(order, paymentId);
+
+  if (outcome === "out_of_stock" || (outcome === "skipped" && order.status === "Cancelled")) {
+    try {
+      await refundAndClose(
+        pool,
+        order,
+        paymentId,
+        outcome === "out_of_stock" ? OUT_OF_STOCK_MESSAGE : EXPIRED_MESSAGE
+      );
+    } catch (_reason) {
+      // refundAndClose already recorded the order and logged any failure; it
+      // rethrows its message only for the customer-facing verify path.
+    }
+  }
+
+  return { handled: true, outcome };
+};
+
 module.exports = {
+  settleWebhookPayment,
   createPaymentOrder,
   verifyPayment,
   markFailed,

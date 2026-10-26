@@ -113,6 +113,14 @@ const pool = {
       return [{ affectedRows: o ? 1 : 0 }];
     }
 
+    if (
+      t.startsWith(
+        "select id, order_number, status, payment_method, payment_status, total_amount, payment_order_id, payment_id from orders where payment_order_id = ?"
+      )
+    ) {
+      return [orders.filter((o) => o.payment_order_id === p[0])];
+    }
+
     throw new Error(`unhandled SQL: ${t}`);
   },
   async getConnection() {
@@ -504,4 +512,161 @@ test("an auto-refund that fails is kept as Refund Pending for the admin retry, a
   // Replaying verify must not hit Razorpay's refund API again.
   await assert.rejects(paymentService.verifyPayment(args));
   assert.equal(apiCalls.filter((c) => c.url.includes("/refund")).length, 1);
+});
+
+
+/* ---------------------------------------------------------------------------
+ *  Razorpay webhook
+ * ------------------------------------------------------------------------- */
+
+const WEBHOOK_SECRET = "whsec_unit";
+const signBody = (raw, secret = WEBHOOK_SECRET) =>
+  crypto.createHmac("sha256", secret).update(raw).digest("hex");
+
+test("webhook signature is checked over the raw body with the webhook secret", () => {
+  const saved = process.env.RAZORPAY_WEBHOOK_SECRET;
+  const raw = Buffer.from(JSON.stringify({ event: "payment.captured" }));
+
+  delete process.env.RAZORPAY_WEBHOOK_SECRET;
+  assert.equal(razorpay.isWebhookConfigured(), false);
+  assert.equal(razorpay.verifyWebhookSignature(raw, signBody(raw)), false);
+
+  process.env.RAZORPAY_WEBHOOK_SECRET = WEBHOOK_SECRET;
+  assert.equal(razorpay.isWebhookConfigured(), true);
+  assert.equal(razorpay.verifyWebhookSignature(raw, signBody(raw)), true);
+  assert.equal(razorpay.verifyWebhookSignature(raw, signBody(raw, "other")), false);
+  assert.equal(razorpay.verifyWebhookSignature(Buffer.from("tampered"), signBody(raw)), false);
+  assert.equal(razorpay.verifyWebhookSignature(raw, undefined), false);
+
+  if (saved === undefined) delete process.env.RAZORPAY_WEBHOOK_SECRET;
+  else process.env.RAZORPAY_WEBHOOK_SECRET = saved;
+});
+
+test("webhook payment.captured settles an unpaid online order once, even if replayed", async () => {
+  await paymentService.createPaymentOrder({ userId: "u1", orderId: "o1" });
+
+  const first = await paymentService.settleWebhookPayment({
+    razorpayOrderId: "order_RZP1",
+    paymentId: "pay_WH",
+    amountPaise: 123450,
+  });
+  assert.deepEqual(first, { handled: true, outcome: "paid" });
+  assert.equal(orders[0].payment_status, "Paid");
+  assert.equal(orders[0].status, "Confirmed");
+  assert.equal(orders[0].payment_id, "pay_WH");
+  assert.equal(variants[0].inventory, 3);
+
+  // Razorpay retries deliveries: the second one must not take stock again.
+  const again = await paymentService.settleWebhookPayment({
+    razorpayOrderId: "order_RZP1",
+    paymentId: "pay_WH",
+    amountPaise: 123450,
+  });
+  assert.deepEqual(again, { handled: true, outcome: "already_paid" });
+  assert.equal(variants[0].inventory, 3);
+});
+
+test("webhook with a different amount never settles the order", async () => {
+  await paymentService.createPaymentOrder({ userId: "u1", orderId: "o1" });
+
+  const result = await paymentService.settleWebhookPayment({
+    razorpayOrderId: "order_RZP1",
+    paymentId: "pay_WH",
+    amountPaise: 100,
+  });
+  assert.deepEqual(result, { handled: false, reason: "amount_mismatch" });
+  assert.notEqual(orders[0].payment_status, "Paid");
+  assert.equal(variants[0].inventory, 5);
+});
+
+test("webhook for an unknown Razorpay order or missing ids is ignored", async () => {
+  assert.deepEqual(
+    await paymentService.settleWebhookPayment({ razorpayOrderId: "order_NOPE", paymentId: "pay_X", amountPaise: 1 }),
+    { handled: false, reason: "unknown_order" }
+  );
+  assert.deepEqual(
+    await paymentService.settleWebhookPayment({ razorpayOrderId: "", paymentId: "", amountPaise: 1 }),
+    { handled: false, reason: "missing_ids" }
+  );
+});
+
+test("webhook leaves a COD order untouched", async () => {
+  orders[0].payment_method = "cod";
+  orders[0].payment_order_id = "order_RZP1";
+  const result = await paymentService.settleWebhookPayment({
+    razorpayOrderId: "order_RZP1",
+    paymentId: "pay_WH",
+    amountPaise: 123450,
+  });
+  assert.deepEqual(result, { handled: false, reason: "not_online" });
+  assert.notEqual(orders[0].payment_status, "Paid");
+});
+
+
+test("webhook endpoint: signed request settles the order, bad or missing signature does not", async () => {
+  const http = require("http");
+  const app = require("../app");
+  process.env.RAZORPAY_WEBHOOK_SECRET = WEBHOOK_SECRET;
+
+  await paymentService.createPaymentOrder({ userId: "u1", orderId: "o1" });
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  const { port } = server.address();
+
+  const post = (raw, headers = {}) =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          port,
+          path: "/api/payments/razorpay/webhook",
+          method: "POST",
+          headers: { "content-type": "application/json", "content-length": Buffer.byteLength(raw), ...headers },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (c) => (data += c));
+          res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(data || "{}") }));
+        }
+      );
+      req.on("error", reject);
+      req.end(raw);
+    });
+
+  try {
+    const raw = JSON.stringify({
+      event: "payment.captured",
+      payload: { payment: { entity: { id: "pay_HTTP", order_id: "order_RZP1", amount: 123450 } } },
+    });
+
+    // No signature and a wrong signature are rejected and change nothing.
+    assert.equal((await post(raw)).status, 400);
+    assert.equal((await post(raw, { "x-razorpay-signature": signBody(raw, "wrong") })).status, 400);
+    assert.notEqual(orders[0].payment_status, "Paid");
+
+    // Signed over the exact raw bytes: accepted, and replaying it is harmless.
+    const ok = await post(raw, { "x-razorpay-signature": signBody(raw) });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.outcome, "paid");
+    assert.equal(orders[0].payment_status, "Paid");
+    assert.equal(variants[0].inventory, 3);
+
+    const replay = await post(raw, { "x-razorpay-signature": signBody(raw) });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.outcome, "already_paid");
+    assert.equal(variants[0].inventory, 3);
+
+    // Events that do not change an order are acknowledged and ignored.
+    const other = JSON.stringify({ event: "payment.authorized" });
+    const ignored = await post(other, { "x-razorpay-signature": signBody(other) });
+    assert.equal(ignored.status, 200);
+    assert.equal(ignored.body.ignored, "payment.authorized");
+
+    // Without a configured secret nothing is processed.
+    delete process.env.RAZORPAY_WEBHOOK_SECRET;
+    assert.equal((await post(raw, { "x-razorpay-signature": signBody(raw) })).status, 503);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    delete process.env.RAZORPAY_WEBHOOK_SECRET;
+  }
 });

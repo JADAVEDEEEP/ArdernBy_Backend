@@ -29,7 +29,15 @@ app.set("trust proxy", 1);
 
 app.use(securityHeaders);
 app.use(cors(corsOptions()));
-app.use(express.json({ limit: "100kb" }));
+app.use(
+  express.json({
+    limit: "100kb",
+    // The Razorpay webhook signature is computed over the exact raw bytes.
+    verify: (req, _res, buf) => {
+      if (req.originalUrl.startsWith("/api/payments/razorpay/webhook")) req.rawBody = buf;
+    },
+  })
+);
 
 // Brute-force protection on login / OTP endpoints, and a general API ceiling.
 app.use(
@@ -53,6 +61,7 @@ app.use("/api/wishlist", wishlistRouter);
 app.use("/api/subscriptions", subscriptionRouter);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/orders", orderRoutes);
+app.post("/api/payments/razorpay/webhook", require("./controller/payment.controller").razorpayWebhook);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/superadmin", superAdminRouter);
 

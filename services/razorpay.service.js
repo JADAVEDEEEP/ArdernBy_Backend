@@ -144,7 +144,24 @@ const verifySignature = ({ razorpayOrderId, razorpayPaymentId, signature }) => {
   return given.length === wanted.length && crypto.timingSafeEqual(given, wanted);
 };
 
+// Webhooks are signed over the RAW request body with a dedicated secret that
+// is set in the Razorpay dashboard (not the API key secret).
+const isWebhookConfigured = () => Boolean(process.env.RAZORPAY_WEBHOOK_SECRET);
+
+const verifyWebhookSignature = (rawBody, signature) => {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret || !rawBody || !signature) return false;
+
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  const given = Buffer.from(String(signature), "utf8");
+  const wanted = Buffer.from(expected, "utf8");
+
+  return given.length === wanted.length && crypto.timingSafeEqual(given, wanted);
+};
+
 module.exports = {
+  isWebhookConfigured,
+  verifyWebhookSignature,
   getCredentials,
   isConfigured,
   toPaise,
