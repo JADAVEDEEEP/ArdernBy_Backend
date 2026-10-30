@@ -123,9 +123,12 @@ const fetchOrderPayments = async (razorpayOrderId) => {
   return Array.isArray(data?.items) ? data.items : [];
 };
 
-const refundPayment = (paymentId, amountRupees) =>
+// extra: optional { receipt, notes } so one of OUR refunds can be recognised later
+// (a payment can carry several partial refunds).
+const refundPayment = (paymentId, amountRupees, extra) =>
   request("POST", `/payments/${encodeURIComponent(paymentId)}/refund`, {
     amount: toPaise(amountRupees),
+    ...(extra || {}),
   });
 
 // Razorpay signs "<razorpay_order_id>|<razorpay_payment_id>" with the key secret.

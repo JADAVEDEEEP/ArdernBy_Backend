@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const { getJwtSecret } = require("../config/jwt");
 const { poolPromise } = require("../config/sql");
+const { PRIVILEGED, isRevoked } = require("../services/session.service");
 
 const unauthorized = (res, message) =>
   res.status(401).json({ success: false, message });
@@ -53,6 +54,12 @@ const authenticateToken = async (req, res, next) => {
     const account = rows[0];
 
     if (!account || !account.is_active) {
+      return unauthorized(res, "Invalid token.");
+    }
+
+    // Sign-out-everywhere / deactivation / role change: Admin and Super Admin
+    // tokens issued before the revocation moment are refused.
+    if (PRIVILEGED.has(account.role) && (await isRevoked(account.id, decoded.iat))) {
       return unauthorized(res, "Invalid token.");
     }
 

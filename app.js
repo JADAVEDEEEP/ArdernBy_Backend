@@ -13,6 +13,8 @@ const paymentRoutes = require("./routes/payment.routes");
 const wishlistRouter = require("./routes/wishlist.routes");
 const subscriptionRouter = require("./routes/subscription.routes");
 const superAdminRouter = require("./routes/superadmin.routes");
+const adminRouter = require("./routes/admin.routes");
+const returnRouter = require("./routes/return.routes");
 const {
   corsOptions,
   securityHeaders,
@@ -64,6 +66,8 @@ app.use("/api/orders", orderRoutes);
 app.post("/api/payments/razorpay/webhook", require("./controller/payment.controller").razorpayWebhook);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/superadmin", superAdminRouter);
+app.use("/api/admin", adminRouter);
+app.use("/api/returns", returnRouter);
 
 app.get("/",(req,res)=>{
   res.send("Welcome to ArdenBy API")

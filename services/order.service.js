@@ -1,6 +1,9 @@
 const crypto = require("crypto");
 const razorpay = require("./razorpay.service");
 const { poolPromise } = require("../config/sql");
+const inventoryHistory = require("./inventory-history.service");
+const deliveryDate = require("./delivery-date.service");
+const payStatus = require("../utils/payment-status");
 const {
   calculateCouponDiscount,
   calculateOrderTotals,
@@ -372,6 +375,17 @@ const createOrder = async ({
           `Unable to update inventory for ${item.product_name}.`
         );
       }
+
+      await inventoryHistory.recordVariantDelta(connection, {
+        variantId: item.variant_id,
+        delta: -Number(item.quantity),
+        reason: "Order placed (cash on delivery)",
+        source: "order_placed",
+        referenceType: "order",
+        referenceId: orderId,
+        actorId: userId,
+        dedupeKey: `order_placed:${orderId}:${item.variant_id}`,
+      });
     }
 
     // --------------------------------------
@@ -464,6 +478,50 @@ const getMyOrders = async (userId) => {
   return rows.map(customerView);
 };
 
+// How many units of each order line were cancelled, and how many are in a (not
+// rejected) return. Empty until the cancellation / return tables exist, so every
+// order screen keeps working before the database update.
+const unitStatesFor = async (pool, orderIds) => {
+  const result = { cancelled: new Map(), returned: new Map() };
+  if (orderIds.length === 0) return result;
+  const marks = orderIds.map(() => "?").join(", ");
+
+  const attempt = async (sql, into) => {
+    try {
+      const [rows] = await pool.execute(sql, orderIds);
+      for (const row of rows) into.set(String(row.order_item_id), Number(row.quantity));
+    } catch (error) {
+      // Extra detail only: never let it break the order screen.
+      if (!(error && (error.code === "ER_NO_SUCH_TABLE" || error.errno === 1146))) {
+        console.error("Order unit states unavailable:", error.code || error.message);
+      }
+    }
+  };
+
+  await attempt(
+    `SELECT i.order_item_id, SUM(i.quantity) AS quantity
+     FROM order_cancellation_items i
+     INNER JOIN order_cancellations c ON c.id = i.cancellation_id
+     WHERE c.order_id IN (${marks}) GROUP BY i.order_item_id`,
+    result.cancelled
+  );
+  await attempt(
+    `SELECT i.order_item_id, SUM(i.quantity) AS quantity
+     FROM return_request_items i
+     INNER JOIN return_requests r ON r.id = i.return_id
+     WHERE r.order_id IN (${marks}) AND r.status <> 'Rejected' GROUP BY i.order_item_id`,
+    result.returned
+  );
+  return result;
+};
+
+const withUnitStates = (items, states) =>
+  items.map((item) => ({
+    ...item,
+    cancelled_quantity: states.cancelled.get(String(item.id)) || 0,
+    returned_quantity: states.returned.get(String(item.id)) || 0,
+  }));
+
 // ==========================================
 // GET ORDER BY ID
 // ==========================================
@@ -541,7 +599,7 @@ const getOrderById = async (userId, orderId) => {
 
   return {
     ...visible,
-    items: itemRows,
+    items: withUnitStates(itemRows, await unitStatesFor(pool, [orderId])),
   };
 };
 
@@ -594,6 +652,38 @@ const orderError = (message, statusCode, code) => {
 
 const sameStatus = (a, b) =>
   String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+
+// Does the new cancellation / return flow already hold records for this order?
+// Those orders are refunded item by item (refund-runner); the original whole-order
+// refund below would pay the same money twice, so it refuses to touch them.
+const hasItemLevelRecords = async (executor, orderId) => {
+  for (const table of ["order_cancellations", "return_requests"]) {
+    try {
+      const [rows] = await executor.execute(`SELECT 1 FROM ${table} WHERE order_id = ? LIMIT 1`, [orderId]);
+      if (rows.length > 0) return true;
+    } catch (error) {
+      if (error.code !== "ER_NO_SUCH_TABLE" && error.errno !== 1146) throw error;
+    }
+  }
+  return false;
+};
+
+// Return requests that are still open (not rejected, not finished).
+const openReturnCount = async (executor, orderId) => {
+  try {
+    const [rows] = await executor.execute(
+      "SELECT COUNT(*) AS n FROM return_requests WHERE order_id = ? AND status IN ('Requested','Approved','Shipped','Received','Inspected')",
+      [orderId]
+    );
+    return Number(rows[0]?.n || 0);
+  } catch (error) {
+    if (error.code === "ER_NO_SUCH_TABLE" || error.errno === 1146) return 0;
+    throw error;
+  }
+};
+
+const ITEM_LEVEL_MESSAGE =
+  "Part of this order was already cancelled or returned, so it is handled item by item. Use the cancel or return screens instead.";
 
 const rupees = (paise) =>
   "₹" + (paise / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 });
@@ -655,13 +745,34 @@ const deferred = (reason, code, statusCode, message) => ({
   message,
 });
 
-const initiateRefund = async (order) => {
+// opts.refKey: a key unique to ONE refund of ours (e.g. "r<return id>"). Sent to
+// Razorpay as the refund's receipt, and used to recognise that refund on a retry.
+// Without it (the original whole-order cancel) "a refund that covers the amount
+// already exists" counts as done; with several partial refunds on one payment that
+// shortcut would wrongly skip the second one, so keyed refunds never use it.
+const initiateRefund = async (order, opts = {}) => {
   const requiredPaise = razorpay.toPaise(order.total_amount);
+  const refKey = opts.refKey || null;
 
   // 1) Idempotency: adopt a refund that already exists instead of making another.
   const existing = await razorpay.fetchPaymentRefunds(order.payment_id);
 
-  if (existing) {
+  if (refKey && existing) {
+    const mine = existing.find(
+      (r) =>
+        (r.receipt === refKey || r.notes?.ref === refKey) &&
+        String(r.status).toLowerCase() !== "failed"
+    );
+    if (mine) {
+      return {
+        outcome: "refunded",
+        refundId: mine.id || null,
+        refundStatus: String(mine.status).toLowerCase() === "processed" ? "processed" : "pending",
+      };
+    }
+  }
+
+  if (!refKey && existing) {
     const live = existing.filter(
       (r) => String(r.status).toLowerCase() !== "failed"
     );
@@ -707,9 +818,30 @@ const initiateRefund = async (order) => {
   let refund;
 
   try {
-    refund = await razorpay.refundPayment(order.payment_id, order.total_amount);
+    refund = await razorpay.refundPayment(
+      order.payment_id,
+      order.total_amount,
+      refKey ? { receipt: refKey, notes: { ref: refKey } } : undefined
+    );
   } catch (error) {
+    // No HTTP answer at all (network drop, timeout): the refund may or may not have
+    // been created. For a keyed refund say so; the retry finds it by its receipt.
+    if (refKey && error && error.razorpayStatus === undefined) {
+      return { outcome: "unknown", message: "No answer from Razorpay: " + (error.message || "network error") };
+    }
+
     const failure = await classifyRefundFailure(error, requiredPaise);
+
+    if (failure.kind === "already_refunded" && refKey) {
+      // The payment is already fully refunded by OTHER refunds, so this one cannot
+      // be made. Never claim it succeeded.
+      return deferred(
+        "already_refunded",
+        "PAYMENT_FULLY_REFUNDED",
+        409,
+        "Razorpay says this payment is already fully refunded, so this refund cannot be made. Check the Razorpay dashboard."
+      );
+    }
 
     if (failure.kind === "already_refunded") {
       // Razorpay holds a refund but we could not read its state: never claim
@@ -809,7 +941,7 @@ const initiateRefund = async (order) => {
 // Paid online order, customer request, refund cannot be funded right now:
 // the order moves to "Cancellation Requested" (nothing is cancelled or marked
 // refunded) and an admin completes it later with the same function.
-const cancelOrderById = async (orderId, { userId = null, reason } = {}) => {
+const cancelOrderById = async (orderId, { userId = null, reason, actorId = null } = {}) => {
   const pool = await poolPromise;
   const connection = await pool.getConnection();
 
@@ -844,6 +976,12 @@ const cancelOrderById = async (orderId, { userId = null, reason } = {}) => {
 
     if (sameStatus(order.status, "Cancelled")) {
       throw orderError(ALREADY_CANCELLED_MESSAGE, 409, "ALREADY_CANCELLED");
+    }
+
+    // Records from the item-level flow exist: a whole-order refund here would pay
+    // the same money again and put the same stock back twice.
+    if (await hasItemLevelRecords(connection, orderId)) {
+      throw orderError(ITEM_LEVEL_MESSAGE, 409, "ITEM_LEVEL_ORDER");
     }
 
     // Legacy "Cancellation Requested" order: the customer already asked; only
@@ -924,9 +1062,7 @@ const cancelOrderById = async (orderId, { userId = null, reason } = {}) => {
     // Stock is only taken for COD orders and for verified-paid online orders.
     const stockWasTaken = !(
       isOnlineOrder &&
-      !["paid", "refunded", "refund pending"].includes(
-        String(order.payment_status).toLowerCase()
-      )
+      !payStatus.isCollected(order.payment_status)
     );
 
     try {
@@ -943,6 +1079,17 @@ const cancelOrderById = async (orderId, { userId = null, reason } = {}) => {
           `,
           [item.quantity, item.variant_id]
         );
+
+        await inventoryHistory.recordVariantDelta(connection, {
+          variantId: item.variant_id,
+          delta: Number(item.quantity),
+          reason: "Order cancelled - stock returned",
+          source: "order_cancelled",
+          referenceType: "order",
+          referenceId: orderId,
+          actorId: userId || actorId,
+          dedupeKey: `order_cancelled:${orderId}:${item.variant_id}`,
+        });
       }
 
       await connection.execute(
@@ -1101,6 +1248,15 @@ const retryPendingRefund = async (orderId) => {
       );
     }
 
+    // Its refunds are tracked per cancellation: retrying here could refund the whole total again.
+    if (await hasItemLevelRecords(connection, orderId)) {
+      throw orderError(
+        "This order's refunds are tracked item by item and are retried from the cancellation record.",
+        409,
+        "ITEM_LEVEL_ORDER"
+      );
+    }
+
     const result = await initiateRefund(order);
 
     if (result.outcome === "deferred") {
@@ -1172,6 +1328,12 @@ const reconcilePendingRefunds = async ({ apply = true, orderId = null } = {}) =>
 
   for (const order of rows) {
     if (orderId && order.id !== orderId) continue;
+
+    // Item-level orders reconcile through their own refund records and the webhook.
+    if (await hasItemLevelRecords(pool, order.id)) {
+      report.push({ id: order.id, orderNumber: order.order_number, outcome: "item_level_skipped" });
+      continue;
+    }
 
     const refunds = await razorpay.fetchPaymentRefunds(order.payment_id);
     const requiredPaise = razorpay.toPaise(order.total_amount);
@@ -1373,10 +1535,12 @@ const getAllOrders = async () => {
     });
   }
 
+  const states = await unitStatesFor(pool, orderIds);
+
   return orders.map((order) => ({
     ...order,
 
-    items: itemsByOrder[order.id] || [],
+    items: withUnitStates(itemsByOrder[order.id] || [], states),
   }));
 };
 
@@ -1386,7 +1550,8 @@ const getAllOrders = async () => {
 
 const updateOrderStatus = async (
   orderId,
-  status
+  status,
+  actorId = null
 ) => {
   const allowedStatuses = [
     "Confirmed",
@@ -1437,9 +1602,38 @@ const updateOrderStatus = async (
     );
   }
 
+  // Once delivered, an order can only move on to Returned (a return is then the
+  // way back); a returned order is final. This keeps the return window, stock and
+  // refunds consistent: nobody can "un-deliver" an order that may already be
+  // inside a return.
+  if (sameStatus(current.status, "Returned")) {
+    throw orderError("A returned order cannot be changed.", 409, "ORDER_FINAL");
+  }
+  if (sameStatus(current.status, "Delivered") && status !== "Returned" && status !== "Delivered") {
+    throw orderError(
+      "A delivered order cannot be moved back. If the customer sends items back, use the Returns page.",
+      409,
+      "ORDER_DELIVERED"
+    );
+  }
+  if (status === "Returned") {
+    if (!sameStatus(current.status, "Delivered")) {
+      throw orderError("Only a delivered order can be marked as returned.", 409, "NOT_DELIVERED");
+    }
+    // A return in progress finishes the order itself (after inspection and refund).
+    const open = await openReturnCount(pool, orderId);
+    if (open > 0) {
+      throw orderError(
+        "This order has a return in progress. Finish it on the Returns page; the order is marked Returned automatically.",
+        409,
+        "RETURN_IN_PROGRESS"
+      );
+    }
+  }
+
   // Cancelling must restore stock (and refund a paid online order).
   if (status === "Cancelled") {
-    await cancelOrderById(orderId);
+    await cancelOrderById(orderId, { actorId });
   } else {
     const unpaidOnline =
       String(current.payment_method).toLowerCase() === "online" &&
@@ -1478,6 +1672,11 @@ const updateOrderStatus = async (
         "ORDER_CHANGED"
       );
     }
+
+    // The return window starts from this moment.
+    if (status === "Delivered" && !sameStatus(current.status, "Delivered")) {
+      await deliveryDate.recordDelivered(pool, orderId, actorId);
+    }
   }
 
   const [rows] = await pool.execute(
@@ -1507,7 +1706,27 @@ const updateOrderStatus = async (
 // EXPORTS
 // ==========================================
 
+// Status + payment state, for the audit trail (before / after an admin change).
+const getOrderStateSnapshot = async (orderId) => {
+  try {
+    const pool = await poolPromise;
+    const [rows] = await pool.execute(
+      "SELECT status, payment_status FROM orders WHERE id = ? LIMIT 1",
+      [orderId]
+    );
+    return rows && rows[0]
+      ? { status: rows[0].status, paymentStatus: rows[0].payment_status }
+      : null;
+  } catch (error) {
+    // Only used to enrich the audit entry; never block the admin action.
+    console.error("Order snapshot for audit failed:", error.code || error.message);
+    return null;
+  }
+};
+
 module.exports = {
+  initiateRefund,
+  getOrderStateSnapshot,
   createOrder,
   getMyOrders,
   getOrderById,

@@ -32,4 +32,18 @@ app.listen(PORT, () => {
     );
   setTimeout(reconcile, 45 * 1000).unref();
   setInterval(reconcile, 15 * 60 * 1000).unref();
+
+  // Cancellation / return refunds Razorpay accepted but had not finished: looked up again until
+  // Razorpay says processed or failed (the webhook may not reach every server). Read-only on
+  // Razorpay; it can never create a refund.
+  const refundSync = require("./services/refund-sync.service");
+  const syncRefunds = () =>
+    refundSync
+      .autoSyncOnce()
+      .then((summary) => {
+        if (summary.examined > 0) console.log("Refund auto-sync:", JSON.stringify(summary));
+      })
+      .catch((error) => console.error("Refund auto-sync failed:", error.message));
+  setTimeout(syncRefunds, 60 * 1000).unref();
+  setInterval(syncRefunds, 5 * 60 * 1000).unref();
 });

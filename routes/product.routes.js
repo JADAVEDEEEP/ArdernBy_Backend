@@ -11,6 +11,15 @@ const {
 } = require("../controller/product.controller");
 
 const {
+  getReviews,
+  getReviewEligibility,
+  createReview,
+  updateReview,
+  deleteReview,
+} = require("../controller/review.controller");
+const { rateLimit } = require("../middleware/security.middleware");
+
+const {
   authorizeRoles,
 } = require("../middleware/role.middleware");
 
@@ -44,6 +53,50 @@ productrouter.get(
 productrouter.get(
   "/",
   getProducts
+);
+
+// ==========================================
+// CUSTOMER REVIEWS
+// ==========================================
+
+productrouter.get("/:slug/reviews", getReviews);
+
+productrouter.get(
+  "/:slug/reviews/eligibility",
+  authenticateToken,
+  getReviewEligibility
+);
+
+// Ownership comes from the login token only: /me never takes a user id.
+const reviewWriteLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  message: "Too many review changes. Please try again later.",
+  keyFn: (req) => req.user?.id,
+});
+const reviewPhotos = [upload.array("photos", 3), verifyImageSignatures];
+
+productrouter.post(
+  "/:slug/reviews",
+  authenticateToken,
+  reviewWriteLimit,
+  ...reviewPhotos,
+  createReview
+);
+
+productrouter.put(
+  "/:slug/reviews/me",
+  authenticateToken,
+  reviewWriteLimit,
+  ...reviewPhotos,
+  updateReview
+);
+
+productrouter.delete(
+  "/:slug/reviews/me",
+  authenticateToken,
+  reviewWriteLimit,
+  deleteReview
 );
 
 // ==========================================

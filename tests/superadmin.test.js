@@ -33,8 +33,12 @@ const row = (a) => ({ ...a, phone: null, auth_provider: "email", email_verified:
 
 const execute = async (sql, params = []) => {
   const text = norm(sql);
+  // The item-level tables are not installed here: the revenue rule is the payment-status one.
+  if (/from order_cancellations limit 1/.test(text)) { const e = new Error("no such table"); e.code = "ER_NO_SUCH_TABLE"; throw e; }
   queries.push(text);
 
+  // Admin / Super Admin sessions are checked against revocations (none in these tests).
+  if (text.startsWith("select revoked_before from session_revocations")) return [[]];
   if (text.startsWith("select id, email, role, is_active from profiles where id = ? limit 1")) {
     return [accounts.filter((a) => a.id === params[0])];
   }
@@ -56,6 +60,12 @@ const execute = async (sql, params = []) => {
   }
   if (text.includes("from profiles where id = ? limit 1")) {
     return [accounts.filter((a) => a.id === params[0]).map(row)];
+  }
+  if (text.includes("from profiles where id = ? and email not like") && !text.endsWith("for update")) {
+    return [accounts.filter((a) => a.id === params[0])];
+  }
+  if (text.startsWith("select count(*) as total from profiles where role = 'superadmin'")) {
+    return [[{ total: accounts.filter((a) => a.role === "superadmin" && a.is_active).length }]];
   }
   if (text.startsWith("select count(*) as total from profiles")) return [[{ total: accounts.length }]];
   if (text.includes("sum(is_active = 0)")) {
@@ -159,7 +169,7 @@ test("revenue SQL counts only paid, non-cancelled orders", async () => {
   queries.length = 0;
   await call("GET", "/api/superadmin/dashboard", { as: ids.owner });
   const revenueSql = queries.find((q) => q.includes("as total_revenue"));
-  assert.match(revenueSql, /lower\(o\.payment_status\) = 'paid'/);
+  assert.match(revenueSql, /lower\(o\.payment_status\) in \('paid', 'partially refunded'\)/);
   assert.match(revenueSql, /not in \('cancelled', 'cancellation requested'\)/);
 });
 
@@ -178,9 +188,12 @@ test("status and role changes work for other accounts", async () => {
   assert.equal(r.json.user.isActive, false);
 
   await call("PATCH", `/api/superadmin/users/${ids.customer}/status`, { as: ids.owner, body: { isActive: true } });
+
+  // Role changes now need a fresh e-mailed code (full flow: admin-controls.test.js).
   r = await call("PATCH", `/api/superadmin/users/${ids.customer}/role`, { as: ids.owner, body: { role: "admin" } });
-  assert.equal(r.status, 200);
-  assert.equal(accounts.find((a) => a.id === ids.customer).role, "admin");
+  assert.equal(r.status, 428);
+  assert.equal(r.json.code, "CONFIRMATION_REQUIRED");
+  assert.equal(accounts.find((a) => a.id === ids.customer).role, "customer");
 });
 
 test("a super admin cannot change their own account", async () => {
@@ -191,8 +204,10 @@ test("a super admin cannot change their own account", async () => {
 
 test("demoting another super admin is allowed while the caller remains", async () => {
   accounts.push({ id: ids.second, email: "s@example.com", role: "superadmin", is_active: 1, full_name: "Second" });
+  // Allowed by the rules, but still needs the confirmation code before it applies.
   const ok = await call("PATCH", `/api/superadmin/users/${ids.second}/role`, { as: ids.owner, body: { role: "customer" } });
-  assert.equal(ok.status, 200);
+  assert.equal(ok.status, 428);
+  assert.equal(accounts.find((a) => a.id === ids.second).role, "superadmin");
 });
 
 // Over HTTP the caller is always a second active super admin, so this guard is

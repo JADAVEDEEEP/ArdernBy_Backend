@@ -1,5 +1,6 @@
 const productService = require("../services/product.service");
 const { publicMessage } = require("../utils/public-error");
+const audit = require("../services/audit.service");
 
 // ==========================================
 // GET ALL PRODUCTS
@@ -73,7 +74,8 @@ const createProduct = async (req, res) => {
   try {
     const product = await productService.createProduct(
       req.body,
-      req.files || []
+      req.files || [],
+      audit.actorFrom(req)
     );
 
     return res.status(201).json({
@@ -102,7 +104,8 @@ const updateProduct = async (req, res) => {
     const product = await productService.updateProduct(
       id,
       req.body,
-      req.files || []
+      req.files || [],
+      audit.actorFrom(req)
     );
 
     return res.status(200).json({
@@ -128,7 +131,7 @@ const deleteProduct = async (req, res) => {
   try {
     const { id } = req.params;
 
-    await productService.deleteProduct(id);
+    await productService.deleteProduct(id, audit.actorFrom(req));
 
     return res.status(200).json({
       success: true,

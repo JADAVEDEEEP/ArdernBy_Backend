@@ -5,6 +5,50 @@ const {
   uploadProductImages,
   deleteProductImage,
 } = require("./storage.service");
+const inventoryHistory = require("./inventory-history.service");
+const audit = require("./audit.service");
+
+// Fields worth keeping in the audit trail when a product changes.
+const AUDIT_FIELDS = [
+  "slug",
+  "name",
+  "category_slug",
+  "price",
+  "mrp",
+  "best_price",
+  "inventory",
+  "best_seller",
+  "new_arrival",
+  "trending",
+  "limited_edition",
+];
+
+const productSnapshot = async (pool, id) => {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT ${AUDIT_FIELDS.join(", ")} FROM products WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    return rows[0] || null;
+  } catch (error) {
+    console.error("Product snapshot for audit failed:", error.code || error.message);
+    return null;
+  }
+};
+
+const changedFields = (before, after) => {
+  const diffBefore = {};
+  const diffAfter = {};
+  for (const key of AUDIT_FIELDS) {
+    const a = before ? before[key] : undefined;
+    const b = after ? after[key] : undefined;
+    if (String(a ?? "") !== String(b ?? "")) {
+      diffBefore[key] = a ?? null;
+      diffAfter[key] = b ?? null;
+    }
+  }
+  return { before: diffBefore, after: diffAfter, changed: Object.keys(diffAfter).length > 0 };
+};
 
 // ==========================================
 // GET ALL PRODUCTS
@@ -37,8 +81,8 @@ const getAllProducts = async ({
         price,
         mrp,
         best_price,
-        rating,
-        review_count,
+        COALESCE((SELECT ROUND(AVG(pr.rating), 1) FROM product_reviews pr WHERE pr.product_id = products.id), 0) AS rating,
+        (SELECT COUNT(*) FROM product_reviews pr WHERE pr.product_id = products.id) AS review_count,
         description,
         fabric_details,
         wash_care,
@@ -185,8 +229,8 @@ const getProductBySlug = async (slug) => {
         price,
         mrp,
         best_price,
-        rating,
-        review_count,
+        COALESCE((SELECT ROUND(AVG(pr.rating), 1) FROM product_reviews pr WHERE pr.product_id = products.id), 0) AS rating,
+        (SELECT COUNT(*) FROM product_reviews pr WHERE pr.product_id = products.id) AS review_count,
         description,
         fabric_details,
         wash_care,
@@ -280,7 +324,7 @@ const assertStock = (value, label) => {
   }
 };
 
-const createProduct = async (product, files = []) => {
+const createProduct = async (product, files = [], actor = null) => {
   const pool = await poolPromise;
 
   const {
@@ -503,6 +547,8 @@ const createProduct = async (product, files = []) => {
 
     assertStock(variant.inventory, "Variant inventory");
 
+    const newVariantId = randomUUID();
+
     await pool.execute(
       `
         INSERT INTO product_variants
@@ -529,7 +575,7 @@ const createProduct = async (product, files = []) => {
         )
       `,
       [
-        randomUUID(),
+        newVariantId,
         id,
         variant.size,
         variant.color,
@@ -537,6 +583,29 @@ const createProduct = async (product, files = []) => {
         variant.sku || null,
       ]
     );
+
+    await inventoryHistory.record(pool, {
+      productId: id,
+      variantId: newVariantId,
+      previous: 0,
+      next: Number(variant.inventory),
+      reason: "Initial stock when the product was created",
+      source: "initial_stock",
+      referenceType: "product",
+      referenceId: id,
+      actorId: actor?.id || null,
+      dedupeKey: `initial_stock:${newVariantId}`,
+    });
+  }
+
+  if (actor) {
+    await audit.record({
+      actor,
+      action: "product.create",
+      resourceType: "product",
+      resourceId: id,
+      after: { slug, name, price, mrp, best_price, inventory },
+    });
   }
 
   return getProductBySlug(slug);
@@ -547,8 +616,10 @@ const createProduct = async (product, files = []) => {
 // ==========================================
 
 
-const updateProduct = async (id, product, files = []) => {
+const updateProduct = async (id, product, files = [], actor = null) => {
   const pool = await poolPromise;
+
+  const beforeSnapshot = actor ? await productSnapshot(pool, id) : null;
 
   const {
     slug,
@@ -719,7 +790,7 @@ const updateProduct = async (id, product, files = []) => {
   if (parsedVariants !== null) {
     const [existingVariants] = await pool.execute(
       `
-        SELECT id, size, color
+        SELECT id, size, color, inventory
         FROM product_variants
         WHERE product_id = ?
       `,
@@ -782,7 +853,23 @@ const updateProduct = async (id, product, files = []) => {
         );
 
         processedIds.add(String(existing.id));
+
+        // The variant row was just set to this exact number, so the change is
+        // known without a second read. (Orders adjust stock on their own paths.)
+        await inventoryHistory.record(pool, {
+          productId: id,
+          variantId: existing.id,
+          previous: existing.inventory,
+          next: Number(variant.inventory),
+          reason: "Stock edited by admin",
+          source: "admin_edit",
+          referenceType: "product",
+          referenceId: id,
+          actorId: actor?.id || null,
+        });
       } else {
+        const addedVariantId = randomUUID();
+
         await pool.execute(
           `
             INSERT INTO product_variants
@@ -791,7 +878,7 @@ const updateProduct = async (id, product, files = []) => {
             VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
           `,
           [
-            randomUUID(),
+            addedVariantId,
             id,
             variant.size,
             variant.color,
@@ -799,6 +886,19 @@ const updateProduct = async (id, product, files = []) => {
             variant.sku || null,
           ]
         );
+
+        await inventoryHistory.record(pool, {
+          productId: id,
+          variantId: addedVariantId,
+          previous: 0,
+          next: Number(variant.inventory),
+          reason: "New size/colour added with opening stock",
+          source: "initial_stock",
+          referenceType: "product",
+          referenceId: id,
+          actorId: actor?.id || null,
+          dedupeKey: `initial_stock:${addedVariantId}`,
+        });
       }
     }
 
@@ -826,7 +926,58 @@ const updateProduct = async (id, product, files = []) => {
           `,
           [existing.id, id]
         );
+
+        await inventoryHistory.record(pool, {
+          productId: id,
+          variantId: existing.id,
+          previous: existing.inventory,
+          next: 0,
+          reason: "Size/colour removed from the product",
+          source: "admin_edit",
+          referenceType: "product",
+          referenceId: id,
+          actorId: actor?.id || null,
+        });
       }
+    }
+  }
+
+  if (actor) {
+    const afterSnapshot = await productSnapshot(pool, id);
+    const diff = changedFields(beforeSnapshot, afterSnapshot);
+
+    // The product-level stock number is separate from the per-size stock above.
+    if (
+      beforeSnapshot &&
+      afterSnapshot &&
+      Number(beforeSnapshot.inventory) !== Number(afterSnapshot.inventory)
+    ) {
+      await inventoryHistory.record(pool, {
+        productId: id,
+        variantId: null,
+        previous: beforeSnapshot.inventory,
+        next: afterSnapshot.inventory,
+        reason: "Product-level stock edited by admin",
+        source: "admin_edit",
+        referenceType: "product",
+        referenceId: id,
+        actorId: actor.id,
+      });
+    }
+
+    if (diff.changed || files.length > 0 || parsedVariants !== null) {
+      await audit.record({
+        actor,
+        action: "product.update",
+        resourceType: "product",
+        resourceId: id,
+        before: diff.before,
+        after: {
+          ...diff.after,
+          ...(files.length > 0 ? { imagesReplaced: files.length } : {}),
+          ...(parsedVariants !== null ? { variantsSubmitted: parsedVariants.length } : {}),
+        },
+      });
     }
   }
 
@@ -838,8 +989,10 @@ const updateProduct = async (id, product, files = []) => {
 // DELETE PRODUCT
 // ==========================================
 
-const deleteProduct = async (id) => {
+const deleteProduct = async (id, actor = null) => {
   const pool = await poolPromise;
+
+  const beforeSnapshot = actor ? await productSnapshot(pool, id) : null;
 
   // ==========================================
   // CHECK PRODUCT
@@ -959,6 +1112,16 @@ const deleteProduct = async (id) => {
     `,
     [id]
   );
+
+  if (actor) {
+    await audit.record({
+      actor,
+      action: "product.delete",
+      resourceType: "product",
+      resourceId: id,
+      before: beforeSnapshot,
+    });
+  }
 
   return true;
 };

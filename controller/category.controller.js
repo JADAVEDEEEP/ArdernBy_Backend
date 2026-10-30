@@ -1,5 +1,6 @@
 const categoryService = require("../services/category.service");
 const { publicMessage } = require("../utils/public-error");
+const audit = require("../services/audit.service");
 
 // GET ALL CATEGORIES
 const getCategories = async (req, res) => {
@@ -46,6 +47,14 @@ const createCategory = async (req, res) => {
   try {
     const category = await categoryService.createCategory(req.body);
 
+    await audit.record({
+      req,
+      action: "category.create",
+      resourceType: "category",
+      resourceId: category?.slug,
+      after: category,
+    });
+
     return res.status(201).json({
       success: true,
       message: "Category created successfully.",
@@ -66,10 +75,21 @@ const updateCategory = async (req, res) => {
   try {
     const { slug } = req.params;
 
+    const before = await audit.snapshotRow("categories", slug);
+
     const category = await categoryService.updateCategory(
       slug,
       req.body
     );
+
+    await audit.record({
+      req,
+      action: "category.update",
+      resourceType: "category",
+      resourceId: slug,
+      before,
+      after: category,
+    });
 
     return res.status(200).json({
       success: true,
@@ -91,7 +111,17 @@ const deleteCategory = async (req, res) => {
   try {
     const { slug } = req.params;
 
+    const before = await audit.snapshotRow("categories", slug);
+
     await categoryService.deleteCategory(slug);
+
+    await audit.record({
+      req,
+      action: "category.delete",
+      resourceType: "category",
+      resourceId: slug,
+      before,
+    });
 
     return res.status(200).json({
       success: true,

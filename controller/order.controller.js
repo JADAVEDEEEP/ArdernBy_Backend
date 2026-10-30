@@ -1,5 +1,8 @@
 const orderService = require("../services/order.service");
 const { publicMessage } = require("../utils/public-error");
+const audit = require("../services/audit.service");
+const cancellationController = require("./cancellation.controller");
+const cancellationService = require("../services/cancellation.service");
 
 
 // ==========================================
@@ -169,31 +172,8 @@ const getOrderById = async (req, res) => {
 // CANCEL ORDER
 // ==========================================
 
-const cancelOrder = async (req, res) => {
-  try {
-    const { orderId } = req.params;
-
-    const result = await orderService.cancelOrder(
-      req.user.id,
-      orderId
-    );
-
-    // The customer only ever sees "Cancelled". Refund bookkeeping (queued /
-    // pending / processed) stays internal and is shown to admins only.
-    return res.status(200).json({
-      success: true,
-      message: "Your order has been cancelled.",
-      order: { id: result.id, status: "Cancelled" },
-    });
-  } catch (error) {
-    console.error("Cancel Order Error:", error);
-
-    return res.status(error.statusCode || 400).json({
-      success: false,
-      message: publicMessage(error),
-    });
-  }
-};
+// Reason (and optional items) are now part of the request; see cancellation.controller.
+const cancelOrder = (req, res) => cancellationController.cancelMine(req, res);
 
 
 // ==========================================
@@ -236,10 +216,35 @@ const updateOrderStatus = async (req, res) => {
       });
     }
 
+    // Cancelling needs a reason and may be partial: it has its own endpoint logic
+    // (cancellation.service). The status box keeps working for it.
+    if (status === "Cancelled") {
+      return cancellationController.adminCancel(req, res);
+    }
+
+    const before = await orderService.getOrderStateSnapshot(orderId);
+
     const order = await orderService.updateOrderStatus(
       orderId,
-      status
+      status,
+      req.user?.id || null
     );
+
+    // Cancelling a paid online order starts a Razorpay refund, so it is logged
+    // as its own action for finance review.
+    await audit.record({
+      req,
+      action: status === "Cancelled" ? "order.cancel" : "order.status_change",
+      resourceType: "order",
+      resourceId: orderId,
+      before,
+      after: {
+        status: order?.status ?? status,
+        paymentStatus: order?.paymentStatus ?? order?.payment_status,
+        refundStatus: order?.refundStatus,
+        refundAmount: order?.refundAmount,
+      },
+    });
 
     return res.status(200).json({
       success: true,
@@ -263,9 +268,41 @@ const updateOrderStatus = async (req, res) => {
 
 const retryCancellationRefund = async (req, res) => {
   try {
+    // Refunds made by the new cancellation engine are retried by that engine.
+    const engine = await cancellationService.retryForOrder({
+      orderId: req.params.orderId,
+      actor: audit.actorFrom(req),
+    });
+    if (engine) {
+      const processed = engine.every((r) => r.refundStatus === "completed");
+      return res.status(200).json({
+        success: true,
+        message: processed
+          ? "Refund processed by Razorpay and recorded."
+          : "Refund sent to Razorpay but not confirmed yet; it stays in progress until Razorpay confirms.",
+        order: { refunds: engine },
+      });
+    }
+
+    const before = await orderService.getOrderStateSnapshot(req.params.orderId);
+
     const result = await orderService.retryCancellationRefund(
       req.params.orderId
     );
+
+    await audit.record({
+      req,
+      action: "order.refund_retry",
+      resourceType: "order",
+      resourceId: req.params.orderId,
+      before,
+      after: {
+        status: result?.status,
+        paymentStatus: result?.paymentStatus,
+        refundStatus: result?.refundStatus,
+        refundAmount: result?.refundAmount,
+      },
+    });
 
     const message =
       result.refundStatus === "processed"

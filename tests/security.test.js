@@ -60,6 +60,10 @@ const resetData = () => {
 };
 
 const rules = [
+  // The new cancellation tables are not installed in these tests: the original cancel applies.
+  [/order_cancellations|from return_requests|order_delivery_log/, () => { const e = new Error("no such table"); e.code = "ER_NO_SUCH_TABLE"; throw e; }],
+  // Admin / Super Admin sessions are checked against revocations (none in these tests).
+  [/from session_revocations where user_id/, () => []],
   [/from profiles where id = \?/, (p) => users.filter((u) => u.id === p[0])],
   [/from profiles where email = \?/, () => []],
   [/^update profiles set full_name = \?/, (p) => {
@@ -408,16 +412,17 @@ test("a customer cannot read another customer's order by changing the id", async
 });
 
 test("a customer cannot cancel another customer's order", async () => {
-  const res = await call("PATCH", "/api/orders/order-alice-cod/cancel", { token: tokens.bob() });
+  const res = await call("PATCH", "/api/orders/order-alice-cod/cancel", { token: tokens.bob(), body: { reasonCode: "changed_mind" } });
   assert.equal(res.status, 404);
   assert.equal(orders.find((o) => o.id === "order-alice-cod").status, "Confirmed");
 });
 
 test("repeating a cancel does not cancel (or refund) twice", async () => {
-  const first = await call("PATCH", "/api/orders/order-alice-cod/cancel", { token: tokens.alice() });
+  const reasonBody = { reasonCode: "changed_mind" };
+  const first = await call("PATCH", "/api/orders/order-alice-cod/cancel", { token: tokens.alice(), body: reasonBody });
   assert.equal(first.status, 200);
 
-  const second = await call("PATCH", "/api/orders/order-alice-cod/cancel", { token: tokens.alice() });
+  const second = await call("PATCH", "/api/orders/order-alice-cod/cancel", { token: tokens.alice(), body: reasonBody });
   assert.equal(second.status, 409);
   assert.equal(razorpayCalls.length, 0);
 });

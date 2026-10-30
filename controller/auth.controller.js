@@ -1,5 +1,6 @@
 const authService = require("../services/auth.service");
 const { publicMessage } = require("../utils/public-error");
+const sessionService = require("../services/session.service");
 
 // Body fields must be plain strings: objects/arrays (e.g. {"$ne": ""}) are
 // rejected before they reach the service layer.
@@ -124,6 +125,11 @@ const verifyOTP = async (req, res) => {
         otp,
         purpose,
       });
+
+    // Admin / Super Admin sign-ins are kept in the login history. Never throws.
+    if (result.token && result.user) {
+      await sessionService.recordLogin({ user: result.user, method: "otp", req });
+    }
 
     return res.status(200).json({
       success: true,
@@ -333,6 +339,10 @@ const googleLogin = async (req, res) => {
       await authService.googleLogin(
         credential
       );
+
+    if (result.token && result.user) {
+      await sessionService.recordLogin({ user: result.user, method: "google", req });
+    }
 
     return res.status(200).json({
       success: true,

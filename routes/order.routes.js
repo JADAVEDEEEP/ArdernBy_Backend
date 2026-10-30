@@ -1,4 +1,5 @@
 const express = require("express");
+const refundSync = require("../controller/refund-sync.controller");
 
 const {
   createOrder,
@@ -17,6 +18,8 @@ const {
 
 const { authorizeRoles } = require("../middleware/role.middleware");
 const { rateLimit, perUser } = require("../middleware/security.middleware");
+
+const cancellation = require("../controller/cancellation.controller");
 
 const orderRouter = express.Router();
 
@@ -59,6 +62,21 @@ orderRouter.get(
   getOrderById
 );
 
+// Cancellation options / refund estimate (the server decides eligibility and amounts)
+orderRouter.get(
+  "/:orderId/cancel-options",
+  authenticateToken,
+  authorizeRoles("customer"),
+  cancellation.options
+);
+orderRouter.post(
+  "/:orderId/cancel-preview",
+  authenticateToken,
+  authorizeRoles("customer"),
+  orderWriteLimiter,
+  cancellation.preview
+);
+
 // Cancel order
 orderRouter.patch(
   "/:orderId/cancel",
@@ -81,6 +99,28 @@ orderRouter.get(
   getAllOrders
 );
 
+// Cancellation with a reason, full or by item
+orderRouter.get(
+  "/admin/:orderId/cancel-options",
+  authenticateToken,
+  authorizeRoles("admin", "superadmin"),
+  cancellation.adminOptions
+);
+orderRouter.post(
+  "/admin/:orderId/cancel-preview",
+  authenticateToken,
+  authorizeRoles("admin", "superadmin"),
+  orderWriteLimiter,
+  cancellation.adminPreview
+);
+orderRouter.post(
+  "/admin/:orderId/cancel",
+  authenticateToken,
+  authorizeRoles("admin", "superadmin"),
+  orderWriteLimiter,
+  cancellation.adminCancel
+);
+
 // Update order status
 orderRouter.patch(
   "/admin/:orderId/status",
@@ -90,6 +130,22 @@ orderRouter.patch(
   updateOrderStatus
 );
 
+
+// Refund history of an order, and the read-only "check with Razorpay" (never creates a refund)
+orderRouter.get(
+  "/admin/:orderId/refunds",
+  authenticateToken,
+  authorizeRoles("admin", "superadmin"),
+  refundSync.history
+);
+
+orderRouter.post(
+  "/admin/:orderId/refunds/check",
+  authenticateToken,
+  authorizeRoles("admin", "superadmin"),
+  orderWriteLimiter,
+  refundSync.check
+);
 
 // Complete a pending cancellation by retrying its refund
 orderRouter.patch(

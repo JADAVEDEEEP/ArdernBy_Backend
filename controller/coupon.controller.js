@@ -1,11 +1,20 @@
 const couponService = require("../services/coupon.service");
 const { publicMessage } = require("../utils/public-error");
+const audit = require("../services/audit.service");
 
 
 // CREATE COUPON
 const createCoupon = async (req, res) => {
   try {
     const coupon = await couponService.createCoupon(req.body);
+
+    await audit.record({
+      req,
+      action: "coupon.create",
+      resourceType: "coupon",
+      resourceId: coupon?.id,
+      after: coupon,
+    });
 
     return res.status(201).json({
       success: true,
@@ -85,10 +94,21 @@ const getCouponByCode = async (req, res) => {
 // UPDATE COUPON
 const updateCoupon = async (req, res) => {
   try {
+    const before = await audit.snapshotRow("coupons", req.params.id);
+
     const coupon = await couponService.updateCoupon(
       req.params.id,
       req.body
     );
+
+    await audit.record({
+      req,
+      action: "coupon.update",
+      resourceType: "coupon",
+      resourceId: req.params.id,
+      before,
+      after: coupon,
+    });
 
     return res.status(200).json({
       success: true,
@@ -109,7 +129,17 @@ const updateCoupon = async (req, res) => {
 // DELETE COUPON
 const deleteCoupon = async (req, res) => {
   try {
+    const before = await audit.snapshotRow("coupons", req.params.id);
+
     await couponService.deleteCoupon(req.params.id);
+
+    await audit.record({
+      req,
+      action: "coupon.delete",
+      resourceType: "coupon",
+      resourceId: req.params.id,
+      before,
+    });
 
     return res.status(200).json({
       success: true,

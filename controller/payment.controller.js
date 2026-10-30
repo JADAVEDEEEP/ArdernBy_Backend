@@ -1,5 +1,8 @@
 const paymentService = require("../services/payment.service");
 const razorpay = require("../services/razorpay.service");
+const refundRunner = require("../services/refund-runner.service");
+const returnService = require("../services/return.service");
+const cancellationService = require("../services/cancellation.service");
 const { publicMessage } = require("../utils/public-error");
 
 const isText = (value) => typeof value === "string" && value.length > 0 && value.length <= 200;
@@ -118,6 +121,29 @@ const razorpayWebhook = async (req, res) => {
 
   const event = req.body || {};
   const eventId = req.get("x-razorpay-event-id") || "n/a";
+
+  // Refund results from Razorpay. Matched to OUR refunds by receipt key / refund id,
+  // moved forward only (a completed refund never goes back), and repeated deliveries
+  // change nothing (the e-mails are deduplicated too).
+  if (event.event === "refund.processed" || event.event === "refund.failed") {
+    const refund = event.payload?.refund?.entity;
+    try {
+      const outcome = await refundRunner.applyRefundEvent({
+        refundId: refund?.id,
+        receipt: refund?.receipt,
+        status: event.event === "refund.failed" ? "failed" : refund?.status || "processed",
+      });
+      if (outcome.matched && outcome.changed) {
+        if (outcome.table === "order_cancellations") await cancellationService.afterRefundChange(outcome.id);
+        if (outcome.table === "return_requests") await returnService.afterRefundChange(outcome.id);
+      }
+      console.log("Razorpay webhook | event:", eventId, "|", event.event, "| refund:", refund?.id, "|", outcome.matched ? (outcome.changed ? "updated" : "already up to date") : outcome.reason);
+      return res.status(200).json({ success: true, matched: Boolean(outcome.matched), changed: Boolean(outcome.changed) });
+    } catch (error) {
+      console.error("Razorpay refund webhook failed | event:", eventId, "|", error.message);
+      return res.status(500).json({ success: false, message: "Could not process the event." });
+    }
+  }
 
   if (event.event !== "payment.captured" && event.event !== "order.paid") {
     // Valid and signed, just not something that changes an order here.

@@ -1,4 +1,7 @@
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 const { poolPromise } = require("../config/sql");
+const refundSql = require("./refund-sql.service");
 
 // ==========================================
 // SHARED SQL FRAGMENTS
@@ -14,7 +17,7 @@ const NOT_DELETED = "email NOT LIKE '%@deleted.ardenby.local'";
 // pending, 'Refund Pending' and 'Refunded' payments never match, and cancelled
 // orders (or ones waiting to be cancelled) are excluded even if still 'Paid'.
 const REVENUE_ORDER =
-  "(LOWER(o.payment_status) = 'paid' AND LOWER(o.status) NOT IN ('cancelled', 'cancellation requested'))";
+  "(LOWER(o.payment_status) IN ('paid', 'partially refunded') AND LOWER(o.status) NOT IN ('cancelled', 'cancellation requested'))";
 
 // The store trades in India: day buckets use IST (UTC+5:30). created_at is UTC.
 const IST_DAY = "DATE(DATE_ADD(o.created_at, INTERVAL 330 MINUTE))";
@@ -43,6 +46,7 @@ const pct = (current, previous) =>
 const getDashboard = async ({ days } = {}) => {
   const range = ALLOWED_RANGES.includes(days) ? days : 30;
   const pool = await poolPromise;
+  await refundSql.refresh(pool);
 
   const [
     [accountRows],
@@ -81,23 +85,23 @@ const getDashboard = async ({ days } = {}) => {
       `
         SELECT
           DATE_FORMAT(${IST_TODAY}, '%Y-%m-%d') AS today,
-          COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} THEN o.total_amount END), 0) AS total_revenue,
+          COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} THEN ${refundSql.net()} END), 0) AS total_revenue,
           COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} THEN 1 END), 0) AS paid_orders,
           COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} AND ${IST_DAY} = ${IST_TODAY}
-            THEN o.total_amount END), 0) AS revenue_today,
+            THEN ${refundSql.net()} END), 0) AS revenue_today,
           COALESCE(SUM(CASE WHEN ${IST_DAY} = ${IST_TODAY} THEN 1 END), 0) AS orders_today,
           COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} AND ${IST_DAY} > DATE_SUB(${IST_TODAY}, INTERVAL 7 DAY)
-            THEN o.total_amount END), 0) AS revenue_7d,
+            THEN ${refundSql.net()} END), 0) AS revenue_7d,
           COALESCE(SUM(CASE WHEN ${IST_DAY} > DATE_SUB(${IST_TODAY}, INTERVAL 7 DAY) THEN 1 END), 0) AS orders_7d,
           COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} AND ${IST_DAY} > DATE_SUB(${IST_TODAY}, INTERVAL 14 DAY)
             AND ${IST_DAY} <= DATE_SUB(${IST_TODAY}, INTERVAL 7 DAY)
-            THEN o.total_amount END), 0) AS revenue_prev_7d,
+            THEN ${refundSql.net()} END), 0) AS revenue_prev_7d,
           COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} AND ${IST_DAY} > DATE_SUB(${IST_TODAY}, INTERVAL 30 DAY)
-            THEN o.total_amount END), 0) AS revenue_30d,
+            THEN ${refundSql.net()} END), 0) AS revenue_30d,
           COALESCE(SUM(CASE WHEN ${IST_DAY} > DATE_SUB(${IST_TODAY}, INTERVAL 30 DAY) THEN 1 END), 0) AS orders_30d,
           COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} AND ${IST_DAY} > DATE_SUB(${IST_TODAY}, INTERVAL 60 DAY)
             AND ${IST_DAY} <= DATE_SUB(${IST_TODAY}, INTERVAL 30 DAY)
-            THEN o.total_amount END), 0) AS revenue_prev_30d
+            THEN ${refundSql.net()} END), 0) AS revenue_prev_30d
         FROM orders o
       `
     ),
@@ -106,7 +110,7 @@ const getDashboard = async ({ days } = {}) => {
         SELECT
           DATE_FORMAT(${IST_DAY}, '%Y-%m-%d') AS day,
           COUNT(*) AS orders,
-          COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} THEN o.total_amount END), 0) AS revenue
+          COALESCE(SUM(CASE WHEN ${REVENUE_ORDER} THEN ${refundSql.net()} END), 0) AS revenue
         FROM orders o
         WHERE ${IST_DAY} > DATE_SUB(${IST_TODAY}, INTERVAL ${range} DAY)
         GROUP BY day
@@ -450,7 +454,109 @@ const setUserRole = ({ actorId, targetId, role }) =>
     },
   });
 
+// ------------------------------------------
+// Pre-checks and account creation used by the confirmation flow
+// ------------------------------------------
+
+const getAccountBrief = async (targetId) => {
+  const pool = await poolPromise;
+  const [rows] = await pool.execute(
+    `SELECT id, email, full_name, role, is_active FROM profiles WHERE id = ? AND ${NOT_DELETED} LIMIT 1`,
+    [targetId]
+  );
+  return rows[0] || null;
+};
+
+// Read-only version of the rules setUserRole enforces under lock. Used BEFORE a
+// confirmation code is issued, so nobody is asked to confirm a change that
+// would be refused anyway. setUserRole still re-checks everything under lock.
+const assertRoleChangeAllowed = async ({ actorId, targetId, role }) => {
+  if (!ROLES.includes(role)) throw httpError("Invalid role.", 400);
+
+  const target = await getAccountBrief(targetId);
+  if (!target) throw httpError("User not found.", 404);
+  if (target.id === actorId) throw httpError("You cannot change your own account here.", 403);
+  if (target.role === role) throw httpError("This account already has that role.", 409);
+  if (!target.is_active) throw httpError("Reactivate this account before changing its role.", 409);
+
+  if (target.role === "superadmin" && role !== "superadmin") {
+    const pool = await poolPromise;
+    const [supers] = await pool.execute(
+      "SELECT COUNT(*) AS total FROM profiles WHERE role = 'superadmin' AND is_active = 1"
+    );
+    if (Number(supers[0]?.total || 0) <= 1) {
+      throw httpError("The last active Super Admin cannot be demoted.", 409);
+    }
+  }
+
+  return target;
+};
+
+const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,}$/;
+
+const cleanName = (value) =>
+  typeof value === "string"
+    ? value
+        .normalize("NFC")
+        .replace(/[\u0000-\u001F\u007F]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 100)
+    : "";
+
+const validateInvite = ({ email, fullName }) => {
+  const address = typeof email === "string" ? email.trim().toLowerCase() : "";
+  if (!address || address.length > 254 || !EMAIL.test(address)) {
+    throw httpError("Enter a valid e-mail address.", 400);
+  }
+  const name = cleanName(fullName);
+  if (name.length < 2) throw httpError("Enter the person's full name.", 400);
+  return { email: address, fullName: name };
+};
+
+const assertEmailFree = async (email) => {
+  const pool = await poolPromise;
+  const [rows] = await pool.execute("SELECT id FROM profiles WHERE email = ? LIMIT 1", [email]);
+  if (rows.length > 0) {
+    throw httpError("An account with this e-mail already exists. Use Change role instead.", 409);
+  }
+};
+
+// Creates an Admin that can only get in by choosing their OWN password through
+// the normal "forgot password" e-mail code flow. The stored password is a
+// random value nobody (including us) ever sees, so there is no shared or
+// default password to leak.
+const createAdminAccount = async ({ email, fullName }) => {
+  const pool = await poolPromise;
+  const id = crypto.randomUUID();
+  const unusable = await bcrypt.hash(crypto.randomBytes(48).toString("base64url"), 12);
+
+  try {
+    await pool.execute(
+      `
+        INSERT INTO profiles
+          (id, full_name, email, password_hash, role, auth_provider,
+           email_verified, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'admin', 'email', 1, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+      `,
+      [id, fullName, email, unusable]
+    );
+  } catch (error) {
+    if (error && (error.code === "ER_DUP_ENTRY" || error.errno === 1062)) {
+      throw httpError("An account with this e-mail already exists.", 409);
+    }
+    throw error;
+  }
+
+  return { id, email, fullName, role: "admin" };
+};
+
 module.exports = {
+  getAccountBrief,
+  assertRoleChangeAllowed,
+  validateInvite,
+  assertEmailFree,
+  createAdminAccount,
   ROLES,
   ALLOWED_RANGES,
   getDashboard,

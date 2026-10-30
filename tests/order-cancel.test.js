@@ -11,6 +11,7 @@ const norm = (sql) => sql.replace(/\s+/g, " ").trim().toLowerCase();
 const orders = [];
 const orderItems = [];
 const variants = [];
+const movements = [];
 let snapshot = null;
 
 // A real transaction holds the row lock (SELECT ... FOR UPDATE) until commit /
@@ -21,6 +22,12 @@ let lockQueue = Promise.resolve();
 const pool = {
   async execute(sql, p = []) {
     const t = norm(sql);
+    // These tests cover the ORIGINAL whole-order cancel; the new engine's tables are not installed here.
+    if (t.includes("order_cancellations") || t.includes("from return_requests") || t.includes("order_delivery_log")) {
+      const missing = new Error("no such table");
+      missing.code = "ER_NO_SUCH_TABLE";
+      throw missing;
+    }
 
     if (t.startsWith("select") && t.includes("from orders where id = ?") && t.endsWith("for update")) {
       const ownerScoped = t.includes("and user_id = ?");
@@ -70,6 +77,17 @@ const pool = {
     }
     if (t.startsWith("update orders set payment_status = ?")) {
       orders.find((o) => o.id === p[1]).payment_status = p[0];
+      return [{ affectedRows: 1 }];
+    }
+    // Inventory history (written next to every stock change).
+    if (t.startsWith("select product_id, inventory from product_variants where id = ?")) {
+      const v = variants.find((x) => x.id === p[0]);
+      return [v ? [{ product_id: "p1", inventory: v.inventory }] : []];
+    }
+    if (t.startsWith("insert ignore into inventory_movements")) {
+      const key = p[11];
+      if (key && movements.some((m) => m.dedupe_key === key)) return [{ affectedRows: 0 }];
+      movements.push({ previous: p[3], next: p[4], delta: p[5], source: p[7], actor: p[10], dedupe_key: key });
       return [{ affectedRows: 1 }];
     }
     throw new Error(`unhandled SQL: ${t}`);
@@ -171,6 +189,7 @@ function fakeRes() {
 }
 
 const seed = (overrides = {}) => {
+  movements.length = 0;
   orders.length = 0;
   orders.push({
     id: "o1",
@@ -231,7 +250,7 @@ test.after(() => {
 const cancelAs = (userId = "u1") => orderService.cancelOrder(userId, "o1");
 const callController = async (userId = "u1") => {
   const res = fakeRes();
-  await cancelOrderController({ params: { orderId: "o1" }, user: { id: userId } }, res);
+  await cancelOrderController({ params: { orderId: "o1" }, user: { id: userId }, body: { reasonCode: "changed_mind" } }, res);
   return res;
 };
 const captureLogs = async (fn) => {
@@ -275,6 +294,23 @@ for (const status of ["Packed", "Shipped", "Delivered", "Returned"]) {
     assert.equal(apiCalls.length, 0);
   });
 }
+
+test("cancelling records ONE inventory-history entry per line (previous, new, source, who)", async () => {
+  seed({ status: "Processing" });
+  await cancelAs();
+  assert.equal(movements.length, 1);
+  assert.deepEqual(
+    { previous: movements[0].previous, next: movements[0].next, delta: movements[0].delta, source: movements[0].source, actor: movements[0].actor },
+    { previous: 5, next: 7, delta: 2, source: "order_cancelled", actor: "u1" }
+  );
+});
+
+test("two simultaneous cancels leave a single inventory-history entry", async () => {
+  seed({ status: "Processing" });
+  await Promise.allSettled([cancelAs(), cancelAs()]);
+  assert.equal(movements.length, 1);
+  assert.equal(variants[0].inventory, 7);
+});
 
 test("an already Cancelled order is rejected and stock is not restored twice", async () => {
   seed({ status: "Cancelled" });

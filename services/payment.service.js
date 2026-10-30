@@ -1,5 +1,7 @@
 const { poolPromise } = require("../config/sql");
 const razorpay = require("./razorpay.service");
+const inventoryHistory = require("./inventory-history.service");
+const paymentStatus = require("../utils/payment-status");
 
 const ORDER_FIELDS = `
   id,
@@ -35,8 +37,8 @@ const loadOwnOrder = async (executor, userId, orderId, lock = false) => {
 const isOnline = (order) =>
   String(order.payment_method).toLowerCase() === "online";
 
-const isPaid = (order) =>
-  String(order.payment_status).toLowerCase() === "paid";
+// "Paid" and "Partially Refunded" both mean the money was collected and is still held.
+const isPaid = (order) => paymentStatus.isHeld(order.payment_status);
 
 // Creates a Razorpay order for an unpaid online order. The amount always comes
 // from the saved order total, never from the client.
@@ -70,7 +72,7 @@ const createPaymentOrder = async ({ userId, orderId }) => {
       WHERE id = ?
         AND user_id = ?
         AND status = 'Processing'
-        AND LOWER(payment_status) <> 'paid'
+        AND LOWER(payment_status) NOT IN ('paid', 'partially refunded')
     `,
     [rzpOrder.id, order.id, userId]
   );
@@ -118,7 +120,7 @@ const finalizePaidOrder = async (order, paymentId) => {
     // very payment: that is success, not a reason to refund it.
     if (
       current &&
-      String(current.payment_status).toLowerCase() === "paid" &&
+      paymentStatus.isHeld(current.payment_status) &&
       current.payment_id === paymentId
     ) {
       await connection.rollback();
@@ -128,7 +130,7 @@ const finalizePaidOrder = async (order, paymentId) => {
     if (
       !current ||
       current.status !== "Processing" ||
-      String(current.payment_status).toLowerCase() === "paid"
+      paymentStatus.isHeld(current.payment_status)
     ) {
       await connection.rollback();
       return "skipped";
@@ -162,6 +164,17 @@ const finalizePaidOrder = async (order, paymentId) => {
         await connection.rollback();
         return "out_of_stock";
       }
+
+      await inventoryHistory.recordVariantDelta(connection, {
+        variantId: item.variant_id,
+        delta: -Number(item.quantity),
+        reason: "Online payment confirmed",
+        source: "order_paid",
+        referenceType: "order",
+        referenceId: order.id,
+        actorId: current.user_id,
+        dedupeKey: `order_paid:${order.id}:${item.variant_id}`,
+      });
     }
 
     await connection.execute(
@@ -224,7 +237,7 @@ const refundAndClose = async (pool, order, paymentId, reason) => {
           payment_id = ?,
           updated_at = UTC_TIMESTAMP(6)
         WHERE id = ?
-          AND LOWER(payment_status) <> 'paid'
+          AND LOWER(payment_status) NOT IN ('paid', 'partially refunded')
       `,
       [paymentId, order.id]
     );
@@ -250,7 +263,7 @@ const refundAndClose = async (pool, order, paymentId, reason) => {
             payment_id = ?,
             updated_at = UTC_TIMESTAMP(6)
           WHERE id = ?
-            AND LOWER(payment_status) NOT IN ('paid', 'refunded', 'refund pending')
+            AND LOWER(payment_status) NOT IN ('paid', 'partially refunded', 'refunded', 'refund pending')
         `,
         [paymentId, order.id]
       );
@@ -269,7 +282,7 @@ const refundAndClose = async (pool, order, paymentId, reason) => {
 // An order that already has a refund on record must never trigger another
 // refund attempt, however often verify / sync are repeated.
 const hasRefundRecord = (order) =>
-  ["refunded", "refund pending"].includes(
+  ["refunded", "refund pending", "partially refunded"].includes(
     String(order.payment_status).toLowerCase()
   );
 
@@ -368,7 +381,7 @@ const syncPayment = async ({ userId, orderId }) => {
   if (
     !isOnline(order) ||
     isPaid(order) ||
-    ["refunded", "refund pending"].includes(String(order.payment_status).toLowerCase()) ||
+    ["refunded", "refund pending", "partially refunded"].includes(String(order.payment_status).toLowerCase()) ||
     !order.payment_order_id
   ) {
     return { paid: isPaid(order), status: order.status };

@@ -2,7 +2,66 @@ const { randomUUID } = require("crypto");
 const { poolPromise } = require("../config/sql");
 const { calculateCouponDiscount } = require("../utils/pricing");
 
-const createCoupon = async (data) => {
+
+// Validates and normalises admin coupon input (create and update). Existing
+// stored coupons are never re-validated; this only guards new writes.
+const CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]{2,29}$/;
+
+const validateCouponInput = (data, { requireCode = true } = {}) => {
+  const fail = (message) => {
+    throw new Error(message);
+  };
+  const input = data && typeof data === "object" ? data : {};
+
+  let code;
+  if (requireCode || input.code !== undefined) {
+    code = String(input.code ?? "").trim().toUpperCase();
+    if (!CODE_PATTERN.test(code)) {
+      fail("Coupon code must be 3-30 characters: letters, numbers, hyphen or underscore.");
+    }
+  }
+
+  const discountType = String(input.discount_type ?? "").toLowerCase();
+  if (!["percentage", "flat"].includes(discountType)) {
+    fail("Discount type must be percentage or flat.");
+  }
+
+  const value = Number(input.discount_value);
+  if (!Number.isFinite(value) || value <= 0) fail("Discount value must be greater than 0.");
+  if (discountType === "percentage" && value > 100) fail("A percentage discount cannot exceed 100.");
+
+  const minOrder = input.min_order === undefined || input.min_order === "" ? 0 : Number(input.min_order);
+  if (!Number.isFinite(minOrder) || minOrder < 0) fail("Minimum order must be 0 or more.");
+
+  let maxDiscount = null;
+  if (input.max_discount !== undefined && input.max_discount !== null && input.max_discount !== "") {
+    maxDiscount = Number(input.max_discount);
+    if (!Number.isFinite(maxDiscount) || maxDiscount <= 0) fail("Maximum discount must be greater than 0.");
+  }
+
+  const expiryDate = new Date(input.expiry);
+  if (!input.expiry || Number.isNaN(expiryDate.getTime())) fail("A valid expiry date is required.");
+
+  const description =
+    input.description === undefined || input.description === null || input.description === ""
+      ? null
+      : String(input.description).trim().slice(0, 255) || null;
+
+  return {
+    code,
+    description,
+    discount_type: discountType,
+    discount_value: value,
+    min_order: minOrder,
+    max_discount: discountType === "percentage" ? maxDiscount : null,
+    // Stored exactly as sent (a date-time without zone), as before.
+    expiry: input.expiry,
+    active: input.active === undefined ? true : Boolean(input.active),
+  };
+};
+
+const createCoupon = async (rawData) => {
+  const data = validateCouponInput(rawData);
   const {
     code,
     description = null,
@@ -141,7 +200,8 @@ const getCouponByCode = async (code) => {
   return rows[0];
 };
 
-const updateCoupon = async (id, data) => {
+const updateCoupon = async (id, rawData) => {
+  const data = validateCouponInput(rawData, { requireCode: false });
   const {
     description,
     discount_type,
