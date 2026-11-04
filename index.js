@@ -23,6 +23,17 @@ app.listen(PORT, () => {
   setTimeout(sweep, 30 * 1000).unref();
   setInterval(sweep, 10 * 60 * 1000).unref();
 
+  // Ends memberships past their date and closes never-paid membership purchases.
+  const membershipSweep = () =>
+    require("./services/membership.service")
+      .sweep()
+      .catch((error) => {
+        // Before membership_phase1.sql is applied the columns do not exist yet: stay quiet.
+        if (![1054, 1146].includes(error.errno)) console.error("Membership sweep failed:", error.message);
+      });
+  setTimeout(membershipSweep, 50 * 1000).unref();
+  setInterval(membershipSweep, 30 * 60 * 1000).unref();
+
   // Refunds Razorpay finished after we recorded them as Refund Pending are
   // marked Refunded once Razorpay confirms (read-only on Razorpay; never creates
   // a refund).

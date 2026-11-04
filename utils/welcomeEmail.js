@@ -14,7 +14,7 @@ const sendWelcomeEmail = async ({ email, name }) => {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Welcome to ARDENBY</title>
+    <title>Welcome to KOVENIK</title>
   </head>
   <body style="margin:0; padding:0; background-color:#0D0D0D; font-family: 'Poppins', Arial, sans-serif;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0D0D0D; padding: 0;">
@@ -32,7 +32,7 @@ const sendWelcomeEmail = async ({ email, name }) => {
                   Welcome in,<br/>${firstName}.
                 </h1>
                 <p style="color:#9C9C9C; font-size: 14px; line-height: 1.7; margin: 0 auto 32px auto; max-width: 400px;">
-                  You've just stepped into ARDENBY. Wear Beyond Ordinary
+                  You've just stepped into KOVENIK. Wear Beyond Ordinary
                   starts the moment you open the store.
                 </p>
                 <a href="${SITE_URL}"
@@ -49,7 +49,7 @@ const sendWelcomeEmail = async ({ email, name }) => {
 
                 <!-- Section label -->
                 <p style="color:#000000; font-size:11px; letter-spacing:3px; margin:0 0 28px 0; text-transform:uppercase; font-weight:700; text-align:center;">
-                  Why ARDENBY
+                  Why KOVENIK
                 </p>
 
                 <!-- 3 stacked rows, editorial numbered style -->
@@ -117,7 +117,7 @@ const sendWelcomeEmail = async ({ email, name }) => {
                   Your first order is waiting.
                 </p>
                 <p style="color:#E5E1D6; font-size:13px; margin:0 0 22px 0;">
-                  Explore the full ARDENBY catalogue now.
+                  Explore the full KOVENIK catalogue now.
                 </p>
                 <a href="${SITE_URL}"
                   style="display:inline-block; background-color:#000000; color:#FFFFFF; text-decoration:none;
@@ -131,10 +131,10 @@ const sendWelcomeEmail = async ({ email, name }) => {
             <tr>
               <td style="background-color:#000000; padding: 32px; text-align:center;">
                 <p style="color:#D6C3A5; letter-spacing: 4px; margin:0 0 14px 0; font-size: 13px; font-weight: 700;">
-                  ARDENBY
+                  KOVENIK
                 </p>
                 <p style="color:#7A7A7A; font-size: 11px; margin:0 0 6px 0;">
-                  © ${new Date().getFullYear()} ARDENBY. All rights reserved.
+                  © ${new Date().getFullYear()} KOVENIK. All rights reserved.
                 </p>
                 <a href="${SITE_URL}" style="color:#9C9C9C; text-decoration:underline; font-size: 11px;">
                   ${SITE_URL.replace("https://", "")}
@@ -159,7 +159,7 @@ const sendWelcomeEmail = async ({ email, name }) => {
       to: email,
     },
     to: email,
-    subject: `Welcome in, ${firstName}. ARDENBY is yours now.`,
+    subject: `Welcome in, ${firstName}. KOVENIK is yours now.`,
     html,
   });
 };

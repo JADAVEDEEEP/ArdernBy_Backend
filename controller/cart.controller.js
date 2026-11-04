@@ -1,4 +1,5 @@
 const cartService = require("../services/cart.service");
+const membershipService = require("../services/membership.service");
 const { publicMessage } = require("../utils/public-error");
 
 // GET CART
@@ -8,9 +9,17 @@ const getCart = async (req, res) => {
 
     const result = await cartService.getCart(userId);
 
+    // Member prices / totals (null for guests and non-members; never blocks the cart).
+    const memberPricing = await membershipService.priceCart(
+      userId,
+      result.items,
+      result.cart?.coupon_code
+    );
+
     return res.status(200).json({
       success: true,
       ...result,
+      memberPricing,
     });
   } catch (error) {
     console.error("Get cart error:", error.message);
@@ -184,6 +193,11 @@ const updateCartCoupon = async (req, res) => {
         ? "Coupon applied to cart successfully."
         : "Coupon removed from cart successfully.",
       ...cart,
+      memberPricing: await membershipService.priceCart(
+        userId,
+        cart.items || [],
+        coupon_code
+      ),
     });
   } catch (error) {
     console.error("Update cart coupon error:", error.message);

@@ -153,11 +153,17 @@ const razorpayWebhook = async (req, res) => {
   const payment = event.payload?.payment?.entity;
 
   try {
-    const result = await paymentService.settleWebhookPayment({
+    const args = {
       razorpayOrderId: payment?.order_id,
       paymentId: payment?.id,
       amountPaise: payment?.amount,
-    });
+    };
+    let result = await paymentService.settleWebhookPayment(args);
+
+    // Not a shop order: it may be a membership purchase (same Razorpay account and webhook).
+    if (result.reason === "unknown_order") {
+      result = await require("../services/membership.service").settleWebhookPayment(args);
+    }
 
     console.log(
       "Razorpay webhook | event:", eventId,

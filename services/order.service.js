@@ -2,6 +2,8 @@ const crypto = require("crypto");
 const razorpay = require("./razorpay.service");
 const { poolPromise } = require("../config/sql");
 const inventoryHistory = require("./inventory-history.service");
+const membershipService = require("./membership.service");
+const { capCouponDiscount } = require("../utils/membership-pricing");
 const deliveryDate = require("./delivery-date.service");
 const payStatus = require("../utils/payment-status");
 const {
@@ -132,10 +134,29 @@ const createOrder = async ({
     // 4. CALCULATE SUBTOTAL
     // --------------------------------------
 
+    // Active members pay their member price. It is recomputed here from the
+    // database; nothing the browser sent can change it.
+    const memberPricing = await membershipService.priceLines(
+      connection,
+      userId,
+      cartItems.map((item) => ({
+        productId: item.product_id,
+        price: item.price_snapshot,
+        mrp: item.product_mrp,
+      }))
+    );
+    cartItems.forEach((item, index) => {
+      item.price_snapshot = memberPricing.unitPrices[index];
+    });
+
     const subtotal = cartItems.reduce(
       (total, item) =>
         total +
         Number(item.price_snapshot) * item.quantity,
+      0
+    );
+    const listSubtotal = cartItems.reduce(
+      (total, item) => total + Number(item.product_mrp) * item.quantity,
       0
     );
 
@@ -194,7 +215,18 @@ const createOrder = async ({
       shippingAmount,
       taxAmount,
       totalAmount,
-    } = calculateOrderTotals(subtotal, discountAmount);
+    } = calculateOrderTotals(
+      subtotal,
+      memberPricing.member
+        ? capCouponDiscount({
+            couponDiscount: discountAmount,
+            listSubtotal,
+            payableSubtotal: subtotal,
+            maxTotalDiscountPercent: memberPricing.maxTotalDiscountPercent,
+          })
+        : discountAmount,
+      { freeShipping: memberPricing.member?.freeDelivery === true }
+    );
 
     // --------------------------------------
     // 9. CREATE ORDER

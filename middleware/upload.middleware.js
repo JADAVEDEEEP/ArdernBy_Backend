@@ -60,7 +60,14 @@ const hasImageSignature = (buffer) => {
 };
 
 const verifyImageSignatures = (req, res, next) => {
-  const files = req.files || (req.file ? [req.file] : []);
+  // upload.array() gives a list, upload.fields() an object of lists.
+  const files = Array.isArray(req.files)
+    ? req.files
+    : req.files
+    ? Object.values(req.files).flat()
+    : req.file
+    ? [req.file]
+    : [];
 
   if (files.some((file) => !hasImageSignature(file.buffer))) {
     return res.status(400).json({

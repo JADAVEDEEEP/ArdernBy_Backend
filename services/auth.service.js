@@ -245,7 +245,7 @@ const sendOTP = async ({
 
     to: email,
 
-    subject: "Your ARDENBY Verification Code",
+    subject: "Your KOVENIK Verification Code",
 
     html: `
 <!DOCTYPE html>
@@ -258,7 +258,7 @@ const sendOTP = async ({
     content="width=device-width, initial-scale=1.0"
   />
 
-  <title>ARDENBY Verification</title>
+  <title>KOVENIK Verification</title>
 </head>
 
 <body style="
@@ -307,7 +307,7 @@ const sendOTP = async ({
                 letter-spacing:8px;
                 color:#111111;
               ">
-                ARDENBY
+                KOVENIK
               </div>
 
               <div style="
@@ -343,7 +343,7 @@ const sendOTP = async ({
                 color:#666666;
               ">
                 Use the verification code below to securely
-                continue with your ARDENBY account.
+                continue with your KOVENIK account.
               </p>
 
               <table
@@ -471,7 +471,7 @@ const sendOTP = async ({
                 color:#FFFFFF;
                 margin-bottom:10px;
               ">
-                ARDENBY
+                KOVENIK
               </div>
 
               <p style="
@@ -480,7 +480,7 @@ const sendOTP = async ({
                 line-height:1.6;
                 color:#A8A8A8;
               ">
-                © ${new Date().getFullYear()} ARDENBY.
+                © ${new Date().getFullYear()} KOVENIK.
                 All rights reserved.
               </p>
 

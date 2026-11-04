@@ -19,7 +19,7 @@ const getBrevoSender = () => {
 
   return {
     from: {
-      name: 'ARDENBY',
+      name: 'KOVENIK',
       address,
     },
     envelopeFrom: address,

@@ -8,6 +8,8 @@ const {
   getAlerts,
 } = require("../controller/admin.controller");
 const ops = require("../controller/admin-ops.controller");
+const banners = require("../controller/banner.controller");
+const upload = require("../middleware/upload.middleware");
 
 const { authenticateToken } = require("../middleware/auth.middleware");
 const { authorizeRoles } = require("../middleware/role.middleware");
@@ -47,6 +49,32 @@ adminRouter.post("/returns/:id/refund-retry", writeLimiter, ops.retryReturnRefun
 adminRouter.post("/returns/:id/refund-check", writeLimiter, refundSync.checkReturn);
 adminRouter.get("/returns-options", ops.returnOptions);
 adminRouter.get("/reports/returns", ops.returnsAnalytics);
+
+// Homepage banners (table editorial_banners). Images: "image" (desktop,
+// required on create) and "mobileImage" (optional portrait artwork).
+const bannerImages = [
+  upload.fields([
+    { name: "image", maxCount: 1 },
+    { name: "mobileImage", maxCount: 1 },
+  ]),
+  upload.verifyImageSignatures,
+];
+adminRouter.get("/banners", banners.listBanners);
+adminRouter.post("/banners", writeLimiter, ...bannerImages, banners.createBanner);
+adminRouter.put("/banners/:id", writeLimiter, ...bannerImages, banners.updateBanner);
+adminRouter.patch("/banners/:id/active", writeLimiter, banners.setBannerActive);
+adminRouter.delete("/banners/:id", writeLimiter, banners.deleteBanner);
+
+// Membership plans, purchases, product rules and manual status changes (audited).
+const membership = require("../controller/membership.controller");
+adminRouter.get("/membership/plans", membership.adminPlans);
+adminRouter.post("/membership/plans", writeLimiter, membership.adminCreatePlan);
+adminRouter.put("/membership/plans/:id", writeLimiter, membership.adminUpdatePlan);
+adminRouter.get("/membership/plans/:id/products", membership.adminRules);
+adminRouter.put("/membership/plans/:id/products/:productId", writeLimiter, membership.adminSetRule);
+adminRouter.put("/membership/settings", writeLimiter, membership.adminSettings);
+adminRouter.get("/membership/purchases", membership.adminPurchases);
+adminRouter.post("/membership/purchases/:id/status", writeLimiter, membership.adminStatus);
 
 // Inventory history (read only).
 adminRouter.get("/inventory/movements", ops.listInventoryMovements);

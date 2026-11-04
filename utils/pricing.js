@@ -33,14 +33,17 @@ const calculateCouponDiscount = (coupon, subtotal) => {
 
 // subtotal - couponDiscount = taxable amount; GST on taxable amount;
 // shipping depends on the pre-coupon subtotal.
-const calculateOrderTotals = (subtotal, couponDiscount = 0) => {
+// options.freeShipping: member benefit (e.g. Gold) that waives the shipping fee.
+const calculateOrderTotals = (subtotal, couponDiscount = 0, options = {}) => {
   const safeSubtotal = roundMoney(subtotal);
   const discountAmount = roundMoney(
     Math.max(0, Math.min(Number(couponDiscount) || 0, safeSubtotal))
   );
   const taxableAmount = roundMoney(safeSubtotal - discountAmount);
   const shippingAmount =
-    safeSubtotal === 0 || safeSubtotal >= FREE_SHIPPING_THRESHOLD
+    safeSubtotal === 0 ||
+    safeSubtotal >= FREE_SHIPPING_THRESHOLD ||
+    options.freeShipping === true
       ? 0
       : SHIPPING_FEE;
   const taxAmount = Math.round(taxableAmount * GST_RATE);
