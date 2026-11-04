@@ -2,6 +2,7 @@ const { poolPromise } = require("../config/sql");
 const razorpay = require("./razorpay.service");
 const inventoryHistory = require("./inventory-history.service");
 const paymentStatus = require("../utils/payment-status");
+const orderEmail = require("./order-email.service");
 
 const ORDER_FIELDS = `
   id,
@@ -89,6 +90,19 @@ const createPaymentOrder = async ({ userId, orderId }) => {
     orderId: order.id,
     orderNumber: order.order_number,
   };
+};
+
+// Confirmation e-mail once a payment is recorded. The verify, sync and webhook
+// paths can all reach the same order, so this is called from each of them;
+// order-email.service sends at most once per order (and only for a confirmed,
+// paid order). Not awaited and never throws: e-mail must not affect payment.
+const confirmByEmail = (order, outcome) => {
+  if (outcome !== "paid" && outcome !== "already_paid") return;
+  try {
+    Promise.resolve(orderEmail.sendOrderConfirmation(order.id)).catch(() => {});
+  } catch (_reason) {
+    // never let an e-mail problem reach the payment flow
+  }
 };
 
 // Called once a payment is verified. In ONE transaction it takes the stock,
@@ -333,6 +347,7 @@ const verifyPayment = async ({
   }
 
   const outcome = await finalizePaidOrder(order, razorpayPaymentId);
+  confirmByEmail(order, outcome);
 
   if (outcome === "already_paid") {
     return { orderNumber: order.order_number, status: "Confirmed", paid: true };
@@ -399,6 +414,7 @@ const syncPayment = async ({ userId, orderId }) => {
   }
 
   const outcome = await finalizePaidOrder(order, captured.id);
+  confirmByEmail(order, outcome);
 
   if (outcome === "already_paid") {
     return { paid: true, status: "Confirmed" };
@@ -450,6 +466,7 @@ const settleWebhookPayment = async ({ razorpayOrderId, paymentId, amountPaise })
   }
 
   const outcome = await finalizePaidOrder(order, paymentId);
+  confirmByEmail(order, outcome);
 
   if (outcome === "out_of_stock" || (outcome === "skipped" && order.status === "Cancelled")) {
     try {

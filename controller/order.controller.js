@@ -3,6 +3,7 @@ const { publicMessage } = require("../utils/public-error");
 const audit = require("../services/audit.service");
 const cancellationController = require("./cancellation.controller");
 const cancellationService = require("../services/cancellation.service");
+const orderEmail = require("../services/order-email.service");
 
 
 // ==========================================
@@ -99,6 +100,17 @@ const createOrder = async (req, res) => {
       paymentMethod,
       shippingAddress,
     });
+
+    // A cash-on-delivery order is final once placed: confirm it by e-mail. Online
+    // orders are confirmed by payment.service after the payment is verified.
+    // Not awaited and never throws, so e-mail can never fail the order.
+    if (String(paymentMethod).toLowerCase() === "cod") {
+      try {
+        Promise.resolve(orderEmail.sendOrderConfirmation(result.id)).catch(() => {});
+      } catch (_reason) {
+        // never let an e-mail problem reach the order response
+      }
+    }
 
     return res.status(201).json({
       success: true,

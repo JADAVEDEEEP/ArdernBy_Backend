@@ -103,6 +103,49 @@ const TEMPLATES = {
       `Hello ${d.name || "there"},\n\nWe could not complete your refund of ${money(d.amount)} on the first try. ` +
       `Our team has been told and will retry it. You do not need to do anything.` + SIGN_OFF,
   }),
+  // Sent once per order: for a cash-on-delivery order when it is placed, for an
+  // online order only after the payment is verified. See order-email.service.js.
+  order_confirmation: (d) => {
+    const online = d.paymentMethod === "online";
+    const placedOn = d.placedAt
+      ? new Date(d.placedAt).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        })
+      : "";
+    const lines = (d.lines || []).map((line) => {
+      const details = [line.size && `Size ${line.size}`, line.color].filter(Boolean).join(", ");
+      return `  - ${line.name}${details ? " (" + details + ")" : ""} x ${line.quantity}  ${money(line.unitPrice * line.quantity)}`;
+    });
+    const address = [d.shipName, d.shipPhone, d.shipAddress, [d.shipCity, d.shipState].filter(Boolean).join(", "), d.shipPincode]
+      .filter(Boolean)
+      .join("\n  ");
+
+    return {
+      subject: `Your KOVENIK order ${d.orderNumber} is confirmed`,
+      text:
+        `Hello ${d.name || "there"},\n\n` +
+        `Thank you for your order. We have received it and will start getting it ready.\n\n` +
+        `Order number: ${d.orderNumber}\n` +
+        (placedOn ? `Placed on: ${placedOn}\n` : "") +
+        `\nItems\n${lines.join("\n")}\n\n` +
+        `Subtotal: ${money(d.subtotal)}\n` +
+        (Number(d.discount) > 0 ? `Discount${d.couponCode ? " (" + d.couponCode + ")" : ""}: -${money(d.discount)}\n` : "") +
+        `Shipping: ${Number(d.shipping) > 0 ? money(d.shipping) : "Free"}\n` +
+        (Number(d.tax) > 0 ? `GST: ${money(d.tax)}\n` : "") +
+        `Total: ${money(d.total)}\n\n` +
+        (online
+          ? `Payment: paid online. Thank you, your payment was received.\n`
+          : `Payment: cash on delivery. Please keep ${money(d.total)} ready when your order arrives.\n`) +
+        (address ? `\nDelivering to\n  ${address}\n` : "") +
+        `\nYou can follow this order any time under My Orders on our website.` +
+        SIGN_OFF,
+    };
+  },
 };
 
 // Claims the dedupe key. true = this caller must send it.
