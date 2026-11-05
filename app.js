@@ -71,6 +71,7 @@ app.use("/api/superadmin", superAdminRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/returns", returnRouter);
 app.use("/api/banners", bannerRouter);
+app.use("/api/support", require("./routes/support.routes"));
 
 app.get("/",(req,res)=>{
   res.send("Welcome to ArdenBy API")
