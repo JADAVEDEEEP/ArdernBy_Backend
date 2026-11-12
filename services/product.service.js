@@ -91,7 +91,7 @@ const getAllProducts = async ({
         new_arrival,
         trending,
         limited_edition,
-        inventory,
+        COALESCE((SELECT SUM(GREATEST(pv.inventory, 0)) FROM product_variants pv WHERE pv.product_id = products.id), 0) AS inventory,
         created_at,
         updated_at
       FROM products
@@ -105,6 +105,7 @@ const getAllProducts = async ({
         (
           ? IS NULL
           OR category_slug = ?
+          OR FIND_IN_SET(?, REPLACE(tags, ' ', '')) > 0
         )
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
@@ -113,6 +114,7 @@ const getAllProducts = async ({
       searchValue,
       searchValue,
       searchValue,
+      categoryValue,
       categoryValue,
       categoryValue,
       Number(limit),
@@ -134,12 +136,14 @@ const getAllProducts = async ({
         (
           ? IS NULL
           OR category_slug = ?
+          OR FIND_IN_SET(?, REPLACE(tags, ' ', '')) > 0
         )
     `,
     [
       searchValue,
       searchValue,
       searchValue,
+      categoryValue,
       categoryValue,
       categoryValue,
     ]
@@ -239,7 +243,7 @@ const getProductBySlug = async (slug) => {
         new_arrival,
         trending,
         limited_edition,
-        inventory,
+        COALESCE((SELECT SUM(GREATEST(pv.inventory, 0)) FROM product_variants pv WHERE pv.product_id = products.id), 0) AS inventory,
         created_at,
         updated_at
       FROM products
@@ -349,9 +353,12 @@ const createProduct = async (product, files = [], actor = null) => {
     new_arrival = false,
     trending = false,
     limited_edition = false,
-    inventory = 0,
     variants,
   } = product;
+
+  // Product stock is derived from the variants below; any "inventory" sent by
+  // a client is ignored so there is a single source of truth.
+  const inventory = 0;
 
   if (!id || !slug || !name) {
     throw new Error("Product id, slug and name are required.");
@@ -360,8 +367,6 @@ const createProduct = async (product, files = [], actor = null) => {
   assertMoney(price, "Price");
   assertMoney(mrp, "MRP");
   assertMoney(best_price, "Best price");
-  assertStock(inventory, "Inventory");
-
   // ==========================================
   // PARSE VARIANTS
   // ==========================================
@@ -598,13 +603,16 @@ const createProduct = async (product, files = [], actor = null) => {
     });
   }
 
+  await inventoryHistory.syncProductStock(pool, id);
+
   if (actor) {
+    const created = await productSnapshot(pool, id);
     await audit.record({
       actor,
       action: "product.create",
       resourceType: "product",
       resourceId: id,
-      after: { slug, name, price, mrp, best_price, inventory },
+      after: { slug, name, price, mrp, best_price, inventory: created ? created.inventory : 0 },
     });
   }
 
@@ -642,7 +650,6 @@ const updateProduct = async (id, product, files = [], actor = null) => {
     new_arrival,
     trending,
     limited_edition,
-    inventory,
     variants,
   } = product;
 
@@ -675,8 +682,6 @@ const updateProduct = async (id, product, files = [], actor = null) => {
   assertMoney(price, "Price");
   assertMoney(mrp, "MRP");
   assertMoney(best_price, "Best price");
-  assertStock(inventory, "Inventory");
-
   await pool.execute(
     `
       UPDATE products SET
@@ -700,7 +705,6 @@ const updateProduct = async (id, product, files = [], actor = null) => {
         new_arrival = ?,
         trending = ?,
         limited_edition = ?,
-        inventory = ?,
         updated_at = UTC_TIMESTAMP(6)
       WHERE id = ?
     `,
@@ -725,7 +729,6 @@ const updateProduct = async (id, product, files = [], actor = null) => {
       new_arrival ? 1 : 0,
       trending ? 1 : 0,
       limited_edition ? 1 : 0,
-      inventory,
       id,
     ]
   );
@@ -942,28 +945,12 @@ const updateProduct = async (id, product, files = [], actor = null) => {
     }
   }
 
+  // Total stock = sum of variant stock, recalculated on the server every save.
+  await inventoryHistory.syncProductStock(pool, id);
+
   if (actor) {
     const afterSnapshot = await productSnapshot(pool, id);
     const diff = changedFields(beforeSnapshot, afterSnapshot);
-
-    // The product-level stock number is separate from the per-size stock above.
-    if (
-      beforeSnapshot &&
-      afterSnapshot &&
-      Number(beforeSnapshot.inventory) !== Number(afterSnapshot.inventory)
-    ) {
-      await inventoryHistory.record(pool, {
-        productId: id,
-        variantId: null,
-        previous: beforeSnapshot.inventory,
-        next: afterSnapshot.inventory,
-        reason: "Product-level stock edited by admin",
-        source: "admin_edit",
-        referenceType: "product",
-        referenceId: id,
-        actorId: actor.id,
-      });
-    }
 
     if (diff.changed || files.length > 0 || parsedVariants !== null) {
       await audit.record({

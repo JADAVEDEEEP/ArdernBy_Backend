@@ -9,6 +9,11 @@ const reasons = require("../utils/reasons");
 const paymentStatus = require("../utils/payment-status");
 const paymentState = require("./payment-state.service");
 const deliveryDate = require("./delivery-date.service");
+const codPayout = require("./cod-payout.service");
+const { buildTimeline } = require("./return-timeline.service");
+const { REFUND_WINDOW_TEXT, refundWindow } = require("../utils/working-days");
+const razorpayx = require("./razorpayx.service");
+const { isValidUpi, normalizeUpi, maskUpi } = require("../utils/upi");
 
 // ==========================================
 // RETURNS
@@ -163,7 +168,7 @@ const moveStatus = async (connection, request, to, actor, note, extraSet = "", e
 // ---- order lines, items -----------------------------------------------------------------
 
 const ORDER_COLUMNS = `id, user_id, order_number, status, payment_method, payment_status, payment_id,
-  subtotal, shipping_amount, discount_amount, tax_amount, total_amount`;
+  subtotal, shipping_amount, discount_amount, tax_amount, cod_fee, cod_fee_tax, total_amount`;
 
 const loadLines = async (executor, orderId) => {
   const [rows] = await executor.execute(
@@ -268,6 +273,10 @@ const availabilityRows = (lines, commitments) =>
     return { line, taken, available: Math.max(Number(line.quantity) - taken, 0) };
   });
 
+// The customer's stated reason decides the default. An admin can change it when the check
+// shows otherwise (it is recorded in the history and the audit trail).
+const isSellerFault = (reasonCode) => reasons.SELLER_FAULT_RETURN_REASONS.includes(String(reasonCode || ""));
+
 const picksFor = (rows, chosen) => {
   const byId = new Map(rows.map((row) => [String(row.line.id), row]));
   return chosen.map((pick) => {
@@ -286,7 +295,7 @@ const picksFor = (rows, chosen) => {
   });
 };
 
-const createRequest = async ({ userId, orderId, reasonCode, description, items, actor }) => {
+const createRequest = async ({ userId, orderId, reasonCode, description, items, upiId, actor }) => {
   const reason = validateReason({ reasonCode, description });
   if (typeof orderId !== "string" || !orderId || orderId.length > 64) throw httpError(400, "Invalid order.");
   const chosen = parseItems(items);
@@ -313,16 +322,35 @@ const createRequest = async ({ userId, orderId, reasonCode, description, items, 
       const verdict = eligibility(policy, order, rows.some((row) => row.available > 0));
       if (!verdict.ok) throw httpError(409, verdict.message, verdict.code);
 
+      // Cash on delivery: nothing was paid online, so the refund goes to the customer's UPI ID.
+      let refundUpi = null;
+      if (same(order.payment_method, "cod")) {
+        if (!isValidUpi(upiId)) {
+          throw httpError(400, "Enter a valid UPI ID, like name@bank, so we can send your refund.", "UPI_REQUIRED");
+        }
+        refundUpi = normalizeUpi(upiId);
+      }
+
       const picks = picksFor(rows, chosen);
       const byId = new Map(lines.map((line) => [String(line.id), line]));
 
+      // The UPI column is only written for cash-on-delivery returns, so prepaid returns
+      // never depend on it.
       await connection.execute(
         `
           INSERT INTO return_requests
-            (id, order_id, user_id, status, customer_reason, reason_code, description, created_at, updated_at)
-          VALUES (?, ?, ?, 'Requested', ?, ?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+            (id, order_id, user_id, status, customer_reason, reason_code, description${refundUpi ? ", refund_upi_id" : ""}, created_at, updated_at)
+          VALUES (?, ?, ?, 'Requested', ?, ?, ?${refundUpi ? ", ?" : ""}, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
         `,
-        [id, orderId, userId, (reason.text ? `${label}: ${reason.text}` : label).slice(0, 500), reason.reasonCode, reason.text || null]
+        [
+          id,
+          orderId,
+          userId,
+          (reason.text ? `${label}: ${reason.text}` : label).slice(0, 500),
+          reason.reasonCode,
+          reason.text || null,
+          ...(refundUpi ? [refundUpi] : []),
+        ]
       );
       for (const pick of picks) {
         const line = byId.get(pick.orderItemId);
@@ -362,7 +390,7 @@ const createRequest = async ({ userId, orderId, reasonCode, description, items, 
 
 // What a refund would be if these items came back in good order (an ESTIMATE shown
 // before submitting; the real figure is decided after inspection).
-const preview = async ({ userId, orderId, items }) =>
+const preview = async ({ userId, orderId, items, reasonCode }) =>
   wrapMissing(async () => {
     const chosen = parseItems(items);
     const pool = await poolPromise;
@@ -372,14 +400,21 @@ const preview = async ({ userId, orderId, items }) =>
     const commitments = await calc.loadCommitments(pool, orderId, lines);
     const picks = picksFor(availabilityRows(lines, commitments), chosen);
     const paid = paymentStatus.isHeld(orders[0].payment_status);
+    const sellerFault = isSellerFault(reasonCode);
     const breakdown = calc.computeRefund({
       order: orders[0],
       lines,
       picks,
       includeShipping: false,
+      sellerFault,
       alreadyRefundedPaise: commitments.refundedPaise,
     });
-    return { estimate: paid ? breakdown.final : 0, breakdown: paid ? breakdown : null, shippingRefunded: false };
+    return {
+      estimate: paid ? breakdown.final : 0,
+      breakdown: paid ? breakdown : null,
+      shippingRefunded: breakdown.shipping > 0,
+      sellerFault,
+    };
   });
 
 // ---- customer: view ---------------------------------------------------------------------
@@ -394,8 +429,31 @@ const CUSTOMER_STATUS = {
   Rejected: { label: "Rejected", note: "We are sorry — this return could not be accepted." },
 };
 
+const PAYOUT_STATUS_NOTE = {
+  pending: "Your refund is being prepared.",
+  processing: "Your refund has been sent to your UPI ID and is being processed.",
+  refunded: "Your refund was sent to your UPI ID.",
+  failed: "We could not send your refund to your UPI ID yet. We will retry, or contact you if we need another UPI ID.",
+};
+
+// COD refunds go out by UPI payout, so the customer sees the four plain states.
+const customerPayout = (row) => {
+  const status = { pending: "pending", processing: "processing", completed: "refunded", failed: "failed" }[row.refund_status];
+  if (!status) return null;
+  return {
+    state: status === "refunded" ? "refunded" : "in_progress",
+    status,
+    note: PAYOUT_STATUS_NOTE[status],
+    amount: money(row.refund_amount),
+    method: "UPI",
+    destination: maskUpi(row.refund_upi_id),
+    reference: status === "refunded" ? row.payout_utr || null : null,
+  };
+};
+
 const customerRefund = (row) => {
   if (!["Inspected", "Completed"].includes(row.status)) return null;
+  if (row.refund_method === codPayout.METHOD) return customerPayout(row);
   switch (row.refund_status) {
     case "completed":
       return { state: "refunded", amount: money(row.refund_amount) };
@@ -408,7 +466,74 @@ const customerRefund = (row) => {
   }
 };
 
-const shapeCustomerReturn = (row, itemRows, lines, history) => {
+const REFUND_STATUS_LABEL = { pending: "Pending", processing: "Processing", completed: "Refunded", failed: "Failed" };
+
+// What the customer is told about how they are paid back (never the full UPI id).
+const refundMethodLabel = (row, paymentMethod) => {
+  if (row.refund_method === "razorpay") return "Original payment method (Razorpay)";
+  if (row.refund_method === codPayout.METHOD) return `UPI ${maskUpi(row.refund_upi_id)}`.trim();
+  if (row.refund_method) return reasons.label(reasons.MANUAL_REFUND_METHODS, row.refund_method);
+  if (row.refund_upi_id) return `UPI ${maskUpi(row.refund_upi_id)}`.trim();
+  if (same(paymentMethod, "online")) return "Original payment method (Razorpay)";
+  return null;
+};
+
+// What the refund is expected to be before it is decided (the real figure is fixed by the
+// server after the check). Server-calculated, never taken from the browser.
+const expectedRefund = ({ order, lines, itemRows, commitments, row }) => {
+  try {
+    if (!order || !paymentStatus.isHeld(order.payment_status)) return null;
+    const usable = itemRows.filter((i) => (row.status === "Inspected" ? i.refundable : true));
+    if (usable.length === 0) return null;
+    const breakdown = calc.computeRefund({
+      order,
+      lines,
+      picks: usable.map((i) => ({
+        orderItemId: String(i.order_item_id),
+        quantity: Number(i.quantity),
+        offset: calc.committedUnits(commitments, i.order_item_id, { beforeReturnId: row.id }),
+      })),
+      includeShipping: false,
+      sellerFault: isSellerFault(row.reason_code),
+      alreadyRefundedPaise: commitments.refundedPaise,
+    });
+    return { amount: breakdown.final, goods: breakdown.goods, shipping: breakdown.shipping, codFee: breakdown.codFee, sellerFault: breakdown.sellerFault };
+  } catch (_error) {
+    return null; // an estimate is a courtesy; never break the page for it
+  }
+};
+
+const shapeCustomerReturn = (row, itemRows, lines, history, ctx = {}) => {
+  const tracking = buildTimeline({ row, history });
+  const decided = row.refund_amount !== null && row.refund_amount !== undefined;
+  const refundDetail =
+    row.status === "Rejected"
+      ? null
+      : {
+          amount: decided ? money(row.refund_amount) : ctx.expected ? ctx.expected.amount : null,
+          isEstimate: !decided,
+          breakdown: decided
+            ? {
+                goods: null,
+                shipping: row.refund_shipping != null ? money(row.refund_shipping) : 0,
+                codFee: row.refund_cod_fee != null ? money(row.refund_cod_fee) : 0,
+              }
+            : ctx.expected
+            ? { goods: ctx.expected.goods, shipping: ctx.expected.shipping, codFee: ctx.expected.codFee }
+            : null,
+          sellerFault: decided ? Boolean(row.refund_seller_fault) : Boolean(ctx.expected && ctx.expected.sellerFault),
+          method: refundMethodLabel(row, ctx.paymentMethod),
+          status: REFUND_STATUS_LABEL[row.refund_status] || null,
+          // The bank reference exists only after RazorpayX confirmed a successful payout.
+          utr: row.refund_status === "completed" && row.refund_method === codPayout.METHOD ? row.payout_utr || null : null,
+          completedAt: row.refund_status === "completed" && row.refund_completed_at ? new Date(row.refund_completed_at).toISOString() : null,
+        };
+  const timelineData = { ...tracking, refund: refundDetail };
+  if (timelineData.estimate && timelineData.estimate.basis == null) delete timelineData.estimate.from, delete timelineData.estimate.to;
+  return shapeCustomerReturnBase(row, itemRows, lines, history, timelineData);
+};
+
+const shapeCustomerReturnBase = (row, itemRows, lines, history, tracking) => {
   const status = CUSTOMER_STATUS[row.status] || { label: row.status, note: "" };
   const byLine = new Map(lines.map((line) => [String(line.id), line]));
   return {
@@ -421,6 +546,8 @@ const shapeCustomerReturn = (row, itemRows, lines, history) => {
     requestedAt: row.created_iso || null,
     trackingReference: row.tracking_reference || null,
     refund: customerRefund(row),
+    refundTo: row.refund_upi_id ? { method: "UPI", destination: maskUpi(row.refund_upi_id) } : null,
+    tracking,
     canMarkShipped: row.status === "Approved",
     items: itemRows.map((item) => {
       const shaped = shapeItem(item, byLine.get(String(item.order_item_id)));
@@ -490,7 +617,16 @@ const getForCustomer = async ({ userId, orderId }) =>
     const history = await loadHistory(pool, returns.map((r) => r.id));
     const requests = [];
     for (const row of returns) {
-      requests.push(shapeCustomerReturn(row, await loadReturnItems(pool, row.id), lines, history.get(row.id) || []));
+      const itemRows = await loadReturnItems(pool, row.id);
+      requests.push(
+        shapeCustomerReturn(row, itemRows, lines, history.get(row.id) || [], {
+          paymentMethod: order.payment_method,
+          expected:
+            row.status === "Rejected" || row.refund_amount != null
+              ? null
+              : expectedRefund({ order, lines, itemRows, commitments, row }),
+        })
+      );
     }
 
     const secondsLeft = policy.enabled ? policy.windowDays * 86400 - Number(order.age_seconds) : 0;
@@ -531,21 +667,29 @@ const shapeAdminReturn = (row, order, customer, lines, itemRows, history, commit
   // What the server would refund for the items currently marked refundable
   // (or for all of them, before inspection), so the admin sees the breakdown first.
   let refundPreview = null;
+  let refundPreviews = null;
+  const sellerFaultDefault = isSellerFault(row.reason_code);
   if (order && ["Received", "Inspected"].includes(row.status) && commitments && row.refund_status == null) {
     try {
       const refundable = itemRows.filter((i) => (row.status === "Inspected" ? i.refundable : true));
       if (refundable.length > 0) {
-        refundPreview = calc.computeRefund({
-          order,
-          lines,
-          picks: refundable.map((i) => ({
-            orderItemId: String(i.order_item_id),
-            quantity: Number(i.quantity),
-            offset: calc.committedUnits(commitments, i.order_item_id, { beforeReturnId: row.id }),
-          })),
-          includeShipping: false,
-          alreadyRefundedPaise: commitments.refundedPaise,
-        });
+        const preview = (sellerFault) =>
+          calc.computeRefund({
+            order,
+            lines,
+            picks: refundable.map((i) => ({
+              orderItemId: String(i.order_item_id),
+              quantity: Number(i.quantity),
+              offset: calc.committedUnits(commitments, i.order_item_id, { beforeReturnId: row.id }),
+            })),
+            includeShipping: false,
+            sellerFault,
+            alreadyRefundedPaise: commitments.refundedPaise,
+          });
+        // Both are server-calculated so the admin can see what ticking "seller's fault" does
+        // before saving. The default follows the customer's reason.
+        refundPreviews = { standard: preview(false), sellerFault: preview(true) };
+        refundPreview = sellerFaultDefault ? refundPreviews.sellerFault : refundPreviews.standard;
       }
     } catch (error) {
       refundPreview = { error: error.message };
@@ -590,8 +734,25 @@ const shapeAdminReturn = (row, order, customer, lines, itemRows, history, commit
       deductionReason: row.refund_deduction_reason,
       amount: row.refund_amount === null || row.refund_amount === undefined ? null : Number(row.refund_amount),
       error: row.refund_error,
+      upiId: row.refund_upi_id || null,
+      sellerFault: row.refund_seller_fault == null ? null : Boolean(row.refund_seller_fault),
+      shipping: row.refund_shipping == null ? null : Number(row.refund_shipping),
+      codFee: row.refund_cod_fee == null ? null : Number(row.refund_cod_fee),
+      payout: row.refund_method === codPayout.METHOD || row.payout_id
+        ? {
+            id: row.payout_id || null,
+            utr: row.payout_utr || null,
+            status: row.payout_status || null,
+            failureReason: row.payout_failure_reason || null,
+            attempts: Number(row.payout_attempts || 0),
+            initiatedAt: row.payout_initiated_at || null,
+            completedAt: row.payout_completed_at || null,
+          }
+        : null,
     },
     refundPreview,
+    refundPreviews,
+    sellerFaultDefault,
     history: history.map((h) => ({
       from: h.from_status,
       to: h.to_status,
@@ -932,7 +1093,12 @@ const inspect = async ({ id, inspections, actor }) => {
     userId: outcome.row.user_id,
     dedupeKey: `return-inspected:${id}`,
     template: "return_inspected",
-    data: { orderNumber: data.order?.order_number, refundable: outcome.anyRefundable },
+    data: {
+      orderNumber: data.order?.order_number,
+      refundable: outcome.anyRefundable,
+      // Same promise as the tracking page.
+      timeline: outcome.anyRefundable ? REFUND_WINDOW_TEXT : "",
+    },
   });
 
   return { id, status: outcome.anyRefundable ? "Inspected" : "Completed", refundable: outcome.anyRefundable };
@@ -976,7 +1142,17 @@ const finishReturn = async (connection, request, actor, note) => {
 
 // Decides the refund from the inspection, then pays it (Razorpay) or records the
 // manual payout (cash on delivery).
-const processRefund = async ({ id, deduction, deductionReason, method, reference, actor }) => {
+const processRefund = async ({ id, deduction, deductionReason, method, reference, sellerFault: sellerFaultInput, actor }) => {
+  const viaPayout = method === codPayout.METHOD;
+  if (viaPayout) {
+    // Asked of RazorpayX itself before anything is saved. If it is off or Payouts is not
+    // activated, nothing is recorded and the admin uses the manual UPI refund instead.
+    const available = await razorpayx.getStatus();
+    if (!available.active) {
+      throw httpError(503, "RazorpayX payouts are not available right now. Use the manual UPI refund.", "PAYOUT_UNAVAILABLE");
+    }
+  }
+
   const prepared = await wrapMissing(() =>
     withConnection(async (connection) => {
       const row = await lockReturn(connection, id);
@@ -997,6 +1173,14 @@ const processRefund = async ({ id, deduction, deductionReason, method, reference
       if (!Number.isFinite(deductionPaise) || deductionPaise < 0) throw httpError(400, "The deduction must be zero or more.");
       const note = deductionPaise > 0 ? requireText(deductionReason, "reason for the deduction") : "";
 
+      // Seller's fault (we sent the wrong, damaged or faulty product): shipping and the COD
+      // handling fee come back too, and nothing may be deducted. A change-of-mind return keeps
+      // its own rules (no shipping / fee back, deduction allowed with a reason).
+      const sellerFault = (typeof sellerFaultInput === "boolean" ? sellerFaultInput : isSellerFault(row.reason_code)) && refundable.length > 0;
+      if (sellerFault && deductionPaise > 0) {
+        throw httpError(400, "No deduction can be taken on a seller-fault return. Untick seller's fault first if the customer is responsible.", "DEDUCTION_NOT_ALLOWED");
+      }
+
       const breakdown = calc.computeRefund({
         order,
         lines,
@@ -1006,6 +1190,7 @@ const processRefund = async ({ id, deduction, deductionReason, method, reference
           offset: calc.committedUnits(commitments, i.order_item_id, { beforeReturnId: id }),
         })),
         includeShipping: false,
+        sellerFault,
         deductionPaise,
         alreadyRefundedPaise: commitments.refundedPaise,
       });
@@ -1020,6 +1205,14 @@ const processRefund = async ({ id, deduction, deductionReason, method, reference
         status = "not_applicable";
       } else if (online) {
         refundMethod = "razorpay";
+        status = "pending";
+      } else if (cod && viaPayout) {
+        // Automatic: a RazorpayX UPI payout to the UPI ID the customer gave. Never the
+        // Razorpay Payment Refund API (a COD order has no payment to refund).
+        if (!row.refund_upi_id) {
+          throw httpError(409, "The customer did not give a UPI ID. Use the manual refund and record how you paid.", "UPI_REQUIRED");
+        }
+        refundMethod = codPayout.METHOD;
         status = "pending";
       } else if (cod) {
         // Money was handed over in cash: a person pays it back and confirms how.
@@ -1048,16 +1241,30 @@ const processRefund = async ({ id, deduction, deductionReason, method, reference
          WHERE id = ? AND refund_status IS NULL`,
         [status, breakdown.calculated, breakdown.deduction, note || null, breakdown.final, refundMethod, refundReference, actor.id, id]
       );
+      if (sellerFault) {
+        try {
+          await connection.execute(
+            "UPDATE return_requests SET refund_seller_fault = 1, refund_shipping = ?, refund_cod_fee = ? WHERE id = ?",
+            [breakdown.shipping, breakdown.codFee, id]
+          );
+        } catch (error) {
+          if (error && (error.code === "ER_BAD_FIELD_ERROR" || error.errno === 1054)) {
+            throw httpError(503, "Seller-fault refunds need a database update that has not been applied yet.", "DB_UPDATE_REQUIRED");
+          }
+          throw error;
+        }
+      }
       await recordHistory(
         connection,
         id,
         "Inspected",
         "Inspected",
         actor,
-        `Refund ${status === "pending" ? "sent for processing" : status.replace("_", " ")}: ₹${breakdown.final.toFixed(2)}`
+        `Refund ${status === "pending" ? "sent for processing" : status.replace("_", " ")}: ₹${breakdown.final.toFixed(2)}` +
+          (sellerFault ? " (seller's fault: shipping and COD fee included)" : "")
       );
 
-      return { row, order, breakdown, status, refundMethod };
+      return { row, order, breakdown, status, refundMethod, sellerFault };
     })
   );
 
@@ -1072,13 +1279,23 @@ const processRefund = async ({ id, deduction, deductionReason, method, reference
       calculated: prepared.breakdown.calculated,
       deduction: prepared.breakdown.deduction,
       amount: prepared.breakdown.final,
+      sellerFault: prepared.sellerFault,
+      shipping: prepared.breakdown.shipping,
+      codFee: prepared.breakdown.codFee,
       status: prepared.status,
       reference: prepared.status === "completed" ? cleanText(reference, 100) : undefined,
     },
     dedupeKey: `return.refund:${id}`,
   });
 
-  if (prepared.status === "pending") {
+  if (prepared.status === "pending" && prepared.refundMethod === codPayout.METHOD) {
+    // Never throws for a RazorpayX problem: the outcome is recorded on the row.
+    try {
+      await codPayout.initiate({ id });
+    } catch (error) {
+      console.error("COD payout could not be started:", error.code || error.message);
+    }
+  } else if (prepared.status === "pending") {
     await refundRunner.runRefund({ table: "return_requests", id, order: prepared.order, amount: prepared.breakdown.final });
   }
   await afterRefundChange(id, actor);
@@ -1111,8 +1328,23 @@ const afterRefundChange = async (returnId, actor = null) => {
     const data = {
       orderNumber: order?.order_number,
       amount: money(row.refund_amount),
-      method: row.refund_method === "razorpay" ? "to your original payment method" : row.refund_method ? row.refund_method.replace("_", " ") : "",
+      method:
+        row.refund_method === "razorpay"
+          ? "to your original payment method"
+          : row.refund_method === codPayout.METHOD
+          ? `to your UPI ID ${maskUpi(row.refund_upi_id)}`
+          : row.refund_method
+          ? row.refund_method.replace("_", " ")
+          : "",
       reference: row.refund_method === "razorpay" ? "" : row.refund_reference,
+      shipping: row.refund_shipping != null ? money(row.refund_shipping) : 0,
+      codFee: row.refund_cod_fee != null ? money(row.refund_cod_fee) : 0,
+      timeline: REFUND_WINDOW_TEXT,
+      estimatedBy: (() => {
+        const base = row.inspected_at || row.updated_at;
+        const window = base ? refundWindow(base) : null;
+        return window ? window.to : "";
+      })(),
     };
     const template = { processing: "return_refund_processing", completed: "return_refund_completed", failed: "return_refund_failed" }[row.refund_status];
     if (template && Number(row.refund_amount) > 0) {
@@ -1131,6 +1363,26 @@ const retryRefund = async ({ id, actor }) =>
     const [rows] = await pool.execute("SELECT * FROM return_requests WHERE id = ? LIMIT 1", [id]);
     const row = rows[0];
     if (!row) throw httpError(404, "Return request not found.");
+    if (row.refund_method === codPayout.METHOD) {
+      if (row.status !== "Inspected" || !["pending", "processing", "failed"].includes(row.refund_status)) {
+        throw httpError(409, "This refund does not need a retry.", "INVALID_TRANSITION");
+      }
+      const result = await codPayout.initiate({ id });
+      await afterRefundChange(id, actor);
+      await audit.record({
+        actor,
+        action: "return.payout_retry",
+        resourceType: "return",
+        resourceId: id,
+        outcome: result.status === "failed" ? "failure" : "success",
+        before: { refund: row.refund_status, payout: row.payout_status },
+        after: { refund: result.status, payoutId: result.payoutId || null, reason: result.error || result.reason || null },
+      });
+      if (result.reason === "in_flight") {
+        throw httpError(409, "A payout attempt is already in progress. Wait a minute, then check again.", "IN_FLIGHT");
+      }
+      return { id, refundStatus: result.status };
+    }
     if (row.status !== "Inspected" || !["pending", "processing", "failed"].includes(row.refund_status) || row.refund_method !== "razorpay") {
       throw httpError(409, "This refund does not need a retry.", "INVALID_TRANSITION");
     }
@@ -1155,6 +1407,19 @@ const retryRefund = async ({ id, actor }) =>
     return { id, refundStatus: outcome.status };
   });
 
+// Whether automatic COD payouts can be used right now (asked of RazorpayX itself).
+const payoutAvailability = async () => {
+  const status = await razorpayx.getStatus();
+  return { enabled: status.enabled, configured: status.configured, active: status.active, reason: status.reason || null };
+};
+
+const checkPayout = async ({ id, actor }) =>
+  wrapMissing(async () => {
+    const result = await codPayout.checkPayout({ id });
+    if (result.changed) await afterRefundChange(id, actor);
+    return { id, ...result };
+  });
+
 const options = () => ({
   reasons: reasons.RETURN_REASONS,
   inspectionResults: reasons.INSPECTION_RESULTS,
@@ -1175,6 +1440,8 @@ module.exports = {
   inspect,
   processRefund,
   retryRefund,
+  checkPayout,
+  payoutAvailability,
   afterRefundChange,
   TRANSITIONS,
 };

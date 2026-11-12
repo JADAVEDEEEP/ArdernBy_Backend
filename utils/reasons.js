@@ -31,6 +31,12 @@ const RETURN_REASONS = [
   { code: "other", label: "Other (please explain)" },
 ];
 
+// Return reasons that are the seller's fault: the customer did not choose wrongly, we
+// sent the wrong, damaged, faulty or misdescribed product. For these the original
+// shipping charge and the COD handling fee are refunded too. "Wrong size" and "Other"
+// are the customer's choice, so they are not.
+const SELLER_FAULT_RETURN_REASONS = ["wrong_product", "damaged", "defective", "quality_issue", "not_as_described"];
+
 const INSPECTION_RESULTS = [
   { code: "unused_original", label: "Unused, original condition" },
   { code: "damaged", label: "Damaged" },
@@ -55,6 +61,7 @@ module.exports = {
   RETURN_REASONS,
   INSPECTION_RESULTS,
   MANUAL_REFUND_METHODS,
+  SELLER_FAULT_RETURN_REASONS,
   codes,
   label: (list, code) => list.find((item) => item.code === code)?.label || code,
 };

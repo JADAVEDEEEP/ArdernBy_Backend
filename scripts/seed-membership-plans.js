@@ -1,50 +1,42 @@
-// Seeds Bronze / Silver / Gold into the existing subscription tables.
+// Moves membership to ONE plan: KOVENIK MEMBER (Rs 199 / year, flat 15% off eligible products).
 //
-//   node scripts/seed-membership-plans.js          -> shows what would be inserted, changes nothing
-//   node scripts/seed-membership-plans.js --apply  -> inserts (needs membership_phase1.sql applied first)
+//   node scripts/seed-membership-plans.js          -> shows what would change, changes nothing
+//   node scripts/seed-membership-plans.js --apply  -> applies it (needs membership_phase1.sql applied first)
 //
-// Idempotent: a plan is matched by slug and a benefit by (plan, benefit_type); existing
-// rows are never updated or deleted, so admin edits and the legacy Free/Plus/Premium
-// plans are left alone. Prices etc. are only the INITIAL values; admins edit them afterwards.
+// What --apply does (all in one transaction):
+//   1. Creates the plan "kovenik-member" and its benefit lines (skipped if the slug already exists;
+//      an existing plan is never overwritten, so admin edits survive a re-run).
+//   2. RETIRES the old Bronze / Silver / Gold plans by setting active = 0 only. Nothing is deleted
+//      and no subscription row is touched, so purchase history stays intact and every term that is
+//      already running continues until its end date (the app presents it as KOVENIK MEMBER and gives
+//      it at least the new 15%, plus the free shipping an old Gold term already had).
+// The legacy Free / Plus / Premium rows (tier_rank = 0) are not touched.
 require("dotenv").config();
 const crypto = require("crypto");
 const mysql = require("mysql2/promise");
 
-const PLANS = [
-  {
-    slug: "bronze", name: "Bronze", tier_rank: 1, price: 99, duration_days: 365, discount_percent: 5, free_delivery: 0,
-    description: "Entry membership: member pricing and exclusive offers.",
-    benefits: [
-      ["DISCOUNT", 5, "5% off eligible products"],
-      ["EXCLUSIVE_OFFERS", null, "Exclusive member offers"],
-      ["NEW_LAUNCH_NOTIFICATIONS", null, "New collection launch notifications"],
-      ["BIRTHDAY_COUPON", null, "Birthday special coupon"],
-    ],
-  },
-  {
-    slug: "silver", name: "Silver", tier_rank: 2, price: 199, duration_days: 365, discount_percent: 8, free_delivery: 0,
-    description: "More savings, early access and priority support.",
-    benefits: [
-      ["DISCOUNT", 8, "8% off eligible products"],
-      ["EARLY_ACCESS", 24, "24-hour early access to new collections"],
-      ["EXCLUSIVE_OFFERS", null, "Exclusive Silver member offers"],
-      ["BIRTHDAY_COUPON", null, "Birthday special coupon"],
-      ["PRIORITY_SUPPORT", null, "Priority customer support"],
-    ],
-  },
-  {
-    slug: "gold", name: "Gold", tier_rank: 3, price: 399, duration_days: 365, discount_percent: 12, free_delivery: 1,
-    description: "Our best membership: biggest savings, longest early access, free shipping.",
-    benefits: [
-      ["DISCOUNT", 12, "12% off eligible products"],
-      ["EARLY_ACCESS", 48, "48-hour early access to new collections"],
-      ["EXCLUSIVE_OFFERS", null, "Exclusive Gold member offers"],
-      ["BIRTHDAY_REWARD", null, "Special birthday reward"],
-      ["PRIORITY_SUPPORT", null, "Priority customer support"],
-      ["FREE_DELIVERY", null, "Free shipping on eligible orders"],
-    ],
-  },
-];
+const PLAN = {
+  slug: "kovenik-member",
+  name: "KOVENIK MEMBER",
+  // Rank 1 on purpose. The membership code no longer uses ranks, but a backend that has not been
+  // redeployed yet still does: with a rank above Gold it would treat buying this plan as an
+  // "upgrade" and end an old Gold/Silver member's paid term early. At rank 1 that old code just
+  // blocks the purchase for Silver/Gold holders and renews Bronze ones. Safe with old and new code.
+  tier_rank: 1,
+  price: 199,
+  duration_days: 365,
+  discount_percent: 15,
+  free_delivery: 0,
+  description: "One membership. Flat 15% off on all eligible products, all year.",
+  benefits: [
+    ["DISCOUNT", 15, "Flat 15% off on all eligible products"],
+  ],
+};
+// Only benefits that actually exist today are seeded. Early access, birthday rewards, priority
+// support, exclusive offers and launch notifications have no implementation behind them yet, so
+// they are NOT promised on the new plan (admins can add a line later once one is built). Members
+// who bought them on an old plan keep seeing them (see getMyMembership).
+const LEGACY_SLUGS = ["bronze", "silver", "gold"];
 
 (async () => {
   const apply = process.argv.includes("--apply");
@@ -65,42 +57,72 @@ const PLANS = [
     );
     if (cols.length === 0) throw new Error("subscription_plans.tier_rank is missing: apply membership_phase1.sql first.");
 
-    for (const plan of PLANS) {
-      const [existing] = await connection.query("SELECT id FROM subscription_plans WHERE slug = ? LIMIT 1", [plan.slug]);
-      let planId = existing[0]?.id;
+    if (apply) {
+      // Two runs at once must not interleave (the slug is unique, so the loser would fail anyway).
+      const [[lock]] = await connection.query("SELECT GET_LOCK('kovenik_membership_seed', 15) AS got");
+      if (Number(lock.got) !== 1) throw new Error("Another seed run holds the lock; try again in a moment.");
+      await connection.beginTransaction();
+    }
 
-      if (planId) {
-        console.log(`plan ${plan.slug}: already exists (left untouched)`);
-      } else {
-        planId = crypto.randomUUID();
-        console.log(`plan ${plan.slug}: ${apply ? "inserting" : "would insert"} ${plan.name} Rs ${plan.price} / ${plan.duration_days}d`);
-        if (apply) {
-          await connection.query(
-            `INSERT INTO subscription_plans
-               (id, name, slug, description, price, duration_days, tier_rank, free_delivery, discount_percent, active)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-            [planId, plan.name, plan.slug, plan.description, plan.price, plan.duration_days, plan.tier_rank, plan.free_delivery, plan.discount_percent]
-          );
-        }
-      }
-
-      for (const [type, value, description] of plan.benefits) {
-        const [has] = await connection.query(
-          "SELECT id FROM subscription_plan_benefits WHERE plan_id = ? AND benefit_type = ? LIMIT 1",
-          [planId, type]
+    // 1. The single plan.
+    const [existing] = await connection.query("SELECT id FROM subscription_plans WHERE slug = ? LIMIT 1", [PLAN.slug]);
+    let planId = existing[0]?.id;
+    if (planId) {
+      console.log(`plan ${PLAN.slug}: already exists (left untouched)`);
+    } else {
+      planId = crypto.randomUUID();
+      console.log(`plan ${PLAN.slug}: ${apply ? "inserting" : "would insert"} ${PLAN.name} Rs ${PLAN.price} / ${PLAN.duration_days}d, ${PLAN.discount_percent}% off`);
+      if (apply) {
+        await connection.query(
+          `INSERT INTO subscription_plans
+             (id, name, slug, description, price, duration_days, tier_rank, free_delivery, discount_percent, active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          [planId, PLAN.name, PLAN.slug, PLAN.description, PLAN.price, PLAN.duration_days, PLAN.tier_rank, PLAN.free_delivery, PLAN.discount_percent]
         );
-        if (has.length > 0) continue;
-        console.log(`  benefit ${type}: ${apply ? "inserting" : "would insert"}`);
-        if (apply) {
-          await connection.query(
-            "INSERT INTO subscription_plan_benefits (id, plan_id, benefit_type, benefit_value, description, active) VALUES (?, ?, ?, ?, ?, 1)",
-            [crypto.randomUUID(), planId, type, value, description]
-          );
-        }
+      }
+    }
+    for (const [type, value, description] of PLAN.benefits) {
+      const [has] = await connection.query(
+        "SELECT id FROM subscription_plan_benefits WHERE plan_id = ? AND benefit_type = ? LIMIT 1",
+        [planId, type]
+      );
+      if (has.length > 0) continue;
+      console.log(`  benefit ${type}: ${apply ? "inserting" : "would insert"}`);
+      if (apply) {
+        await connection.query(
+          "INSERT INTO subscription_plan_benefits (id, plan_id, benefit_type, benefit_value, description, active) VALUES (?, ?, ?, ?, ?, 1)",
+          [crypto.randomUUID(), planId, type, value, description]
+        );
       }
     }
 
-    if (!apply) console.log("Dry run only. Re-run with --apply to seed.");
+    // 2. Retire the old tiers (hide only) and report who is still on them.
+    const [legacy] = await connection.query(
+      `SELECT p.id, p.slug, p.active,
+              (SELECT COUNT(*) FROM subscriptions s WHERE s.plan_id = p.id AND s.status = 'active' AND s.end_date > UTC_TIMESTAMP()) AS running_terms,
+              (SELECT COUNT(*) FROM subscriptions s WHERE s.plan_id = p.id) AS all_rows
+       FROM subscription_plans p WHERE p.slug IN (?) AND p.tier_rank > 0`,
+      [LEGACY_SLUGS]
+    );
+    for (const plan of legacy) {
+      console.log(
+        `legacy ${plan.slug}: ${plan.active ? (apply ? "retiring (active = 0)" : "would retire (active = 0)") : "already retired"}` +
+          ` | running terms kept: ${plan.running_terms} | subscription rows kept: ${plan.all_rows}`
+      );
+      if (apply && plan.active) await connection.query("UPDATE subscription_plans SET active = 0 WHERE id = ?", [plan.id]);
+    }
+
+    if (apply) {
+      await connection.commit();
+      console.log("Applied.");
+    } else {
+      console.log("Dry run only. Re-run with --apply to apply.");
+    }
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {}
+    throw error;
   } finally {
     await connection.end();
   }

@@ -1,6 +1,7 @@
 const authService = require("../services/auth.service");
 const { publicMessage } = require("../utils/public-error");
 const sessionService = require("../services/session.service");
+const auditService = require("../services/audit.service");
 
 // Body fields must be plain strings: objects/arrays (e.g. {"$ne": ""}) are
 // rejected before they reach the service layer.
@@ -55,6 +56,16 @@ const authenticate = async (req, res) => {
         email: email.trim().toLowerCase(),
         password,
       });
+
+    if (result.isNewUser) {
+      await auditService.record({
+        actor: { id: result.userId || null, email: result.email || email.trim().toLowerCase(), role: "customer", ip: req.ip || null },
+        action: "user.register",
+        resourceType: "user",
+        resourceId: result.userId,
+        dedupeKey: `user_register:${result.userId}`,
+      });
+    }
 
     return res.status(
       result.isNewUser ? 201 : 200

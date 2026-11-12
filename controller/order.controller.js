@@ -101,6 +101,23 @@ const createOrder = async (req, res) => {
       shippingAddress,
     });
 
+    // Every order placed by a customer goes in the audit trail (record() never throws).
+    await audit.record({
+      req,
+      action: "order.place",
+      resourceType: "order",
+      resourceId: result.id,
+      after: {
+        orderNumber: result.orderNumber,
+        paymentMethod: result.paymentMethod,
+        status: result.status,
+        paymentStatus: result.paymentStatus,
+        totalAmount: result.totalAmount,
+        couponCode: result.couponCode,
+      },
+      dedupeKey: `order_place:${result.id}`,
+    });
+
     // A cash-on-delivery order is final once placed: confirm it by e-mail. Online
     // orders are confirmed by payment.service after the payment is verified.
     // Not awaited and never throws, so e-mail can never fail the order.

@@ -82,6 +82,32 @@ const record = async (
   }
 };
 
+// The product's total stock is NEVER typed in: it is always the sum of its
+// variants' stock. Every code path that changes a variant (admin edit, order,
+// payment, cancellation, return) ends here so products.inventory cannot drift.
+// Run it on the same executor/connection as the variant change. Never throws.
+const syncProductStock = async (executor, productId) => {
+  if (!productId) return false;
+  try {
+    await executor.execute(
+      `
+        UPDATE products
+        SET inventory = (
+          SELECT COALESCE(SUM(GREATEST(pv.inventory, 0)), 0)
+          FROM product_variants pv
+          WHERE pv.product_id = ?
+        )
+        WHERE id = ?
+      `,
+      [String(productId), String(productId)]
+    );
+    return true;
+  } catch (error) {
+    logFailure(`sync_product_stock ${productId}`, error);
+    return false;
+  }
+};
+
 // For code that has just applied "inventory = inventory +/- n" to one variant:
 // reads the resulting quantity and records the step. Call it AFTER the update,
 // on the same connection.
@@ -95,6 +121,8 @@ const recordVariantDelta = async (
       [variantId]
     );
     if (!rows[0]) return false;
+
+    await syncProductStock(executor, rows[0].product_id);
 
     const next = Number(rows[0].inventory);
     return await record(executor, {
@@ -254,4 +282,4 @@ const list = async ({ page, limit, productId, variantId, source, from, to, searc
   };
 };
 
-module.exports = { record, recordVariantDelta, list, SOURCES };
+module.exports = { record, recordVariantDelta, syncProductStock, list, SOURCES };

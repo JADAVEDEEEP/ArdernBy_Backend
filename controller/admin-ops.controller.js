@@ -136,14 +136,27 @@ const refundReturn = handler("Admin return refund error", async (req, res) => {
     deductionReason: req.body?.deductionReason,
     method: str(req.body?.method),
     reference: req.body?.reference,
+    // Only an explicit true / false changes the default that follows the customer's reason.
+    sellerFault: typeof req.body?.sellerFault === "boolean" ? req.body.sellerFault : undefined,
     actor: audit.actorFrom(req),
   });
   return res.status(200).json({ success: true, return: data });
 });
 
 const returnOptions = handler("Admin return options error", async (req, res) =>
-  res.status(200).json({ success: true, ...returnService.options() })
+  res.status(200).json({
+    success: true,
+    ...returnService.options(),
+    // Whether the automatic RazorpayX UPI payout is usable right now (else: manual UPI refund).
+    payouts: await returnService.payoutAvailability(),
+  })
 );
+
+const checkReturnPayout = handler("Admin check payout error", async (req, res) => {
+  if (!validId(res, req.params.id)) return undefined;
+  const data = await returnService.checkPayout({ id: req.params.id, actor: audit.actorFrom(req) });
+  return res.status(200).json({ success: true, data });
+});
 
 const returnsAnalytics = handler("Admin returns analytics error", async (req, res) => {
   const data = await returnAnalytics.getReturnAnalytics({
@@ -250,6 +263,7 @@ module.exports = {
   returnOptions,
   returnsAnalytics,
   retryReturnRefund,
+  checkReturnPayout,
   listInventoryMovements,
   exportOrders,
   exportSalesSummary,

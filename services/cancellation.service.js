@@ -64,7 +64,7 @@ const clean = (value, max) =>
 const lc = (value) => String(value || "").trim().toLowerCase();
 
 const ORDER_COLUMNS = `id, user_id, order_number, status, payment_method, payment_status, payment_id,
-  subtotal, shipping_amount, discount_amount, tax_amount, total_amount`;
+  subtotal, shipping_amount, discount_amount, tax_amount, cod_fee, cod_fee_tax, total_amount`;
 
 // ---- rules ------------------------------------------------------------------
 

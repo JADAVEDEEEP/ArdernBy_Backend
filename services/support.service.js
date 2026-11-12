@@ -108,6 +108,26 @@ const submit = async (input, deps = {}) => {
     throw httpError(502, "We could not send your message. Please try again in a moment.", "SUPPORT_SEND_FAILED");
   }
 
+  // Acknowledge to the customer (best effort: the message itself already reached the inbox).
+  try {
+    const { TEMPLATES } = require("./email/templates");
+    const ack = TEMPLATES.support_received({
+      name: fields.name.split(" ")[0],
+      subject: fields.subject,
+      orderNumber: fields.orderNumber,
+    });
+    await sendMail({
+      from,
+      envelope: { from: envelopeFrom, to: fields.email },
+      to: fields.email,
+      subject: ack.subject,
+      text: ack.text,
+      html: ack.html,
+    });
+  } catch (error) {
+    console.error("Support confirmation e-mail failed:", error.code || error.message);
+  }
+
   return { received: true };
 };
 

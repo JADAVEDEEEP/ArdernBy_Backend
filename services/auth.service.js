@@ -4,11 +4,6 @@ const { randomUUID } = require("crypto");
 
 const { poolPromise } = require("../config/sql");
 
-const {
-  transporter,
-  getBrevoSender,
-} = require("../config/mailer");
-
 const { getJwtSecret } = require("../config/jwt");
 const sendWelcomeEmail = require("../utils/welcomeEmail");
 const { OAuth2Client } = require("google-auth-library");
@@ -233,270 +228,10 @@ const sendOTP = async ({
   // SEND OTP EMAIL
   // ===================================================
 
-  const sender = getBrevoSender();
-
-  await transporter.sendMail({
-    from: sender.from,
-
-    envelope: {
-      from: sender.envelopeFrom,
-      to: email,
-    },
-
+  await require("./notification.service").deliver({
     to: email,
-
-    subject: "Your KOVENIK Verification Code",
-
-    html: `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
-  />
-
-  <title>KOVENIK Verification</title>
-</head>
-
-<body style="
-  margin:0;
-  padding:0;
-  background:#F4F1EC;
-  font-family:Arial, Helvetica, sans-serif;
-  color:#171717;
-">
-
-  <table
-    width="100%"
-    cellpadding="0"
-    cellspacing="0"
-    border="0"
-    style="
-      background:#F4F1EC;
-      padding:45px 15px;
-    "
-  >
-    <tr>
-      <td align="center">
-
-        <table
-          width="100%"
-          cellpadding="0"
-          cellspacing="0"
-          border="0"
-          style="
-            max-width:560px;
-            background:#FFFFFF;
-            border:1px solid #E6E0D7;
-          "
-        >
-
-          <tr>
-            <td
-              align="center"
-              style="padding:38px 30px 28px;"
-            >
-
-              <div style="
-                font-family:Georgia, 'Times New Roman', serif;
-                font-size:30px;
-                font-weight:bold;
-                letter-spacing:8px;
-                color:#111111;
-              ">
-                KOVENIK
-              </div>
-
-              <div style="
-                width:45px;
-                height:1px;
-                background:#B8A98F;
-                margin:18px auto 0;
-              "></div>
-
-            </td>
-          </tr>
-
-          <tr>
-            <td style="padding:10px 45px 45px;">
-
-              <h1 style="
-                margin:0 0 14px;
-                text-align:center;
-                font-family:Georgia, 'Times New Roman', serif;
-                font-size:28px;
-                font-weight:normal;
-                color:#191919;
-              ">
-                Verify your account
-              </h1>
-
-              <p style="
-                margin:0 auto;
-                max-width:400px;
-                text-align:center;
-                font-size:15px;
-                line-height:1.7;
-                color:#666666;
-              ">
-                Use the verification code below to securely
-                continue with your KOVENIK account.
-              </p>
-
-              <table
-                width="100%"
-                cellpadding="0"
-                cellspacing="0"
-                border="0"
-                style="
-                  margin:32px 0 25px;
-                  background:#FBF9F5;
-                  border:1px solid #E3DCD1;
-                "
-              >
-                <tr>
-
-                  <td
-                    align="center"
-                    style="padding:28px 20px;"
-                  >
-
-                    <div style="
-                      font-size:11px;
-                      font-weight:bold;
-                      letter-spacing:3px;
-                      color:#8A7C69;
-                      text-transform:uppercase;
-                      margin-bottom:15px;
-                    ">
-                      Verification Code
-                    </div>
-
-                    <div style="
-                      font-family:Arial, Helvetica, sans-serif;
-                      font-size:34px;
-                      font-weight:bold;
-                      letter-spacing:9px;
-                      color:#111111;
-                      padding-left:9px;
-                    ">
-                      ${otp}
-                    </div>
-
-                  </td>
-
-                </tr>
-              </table>
-
-              <table
-                width="100%"
-                cellpadding="0"
-                cellspacing="0"
-                border="0"
-                style="margin-bottom:28px;"
-              >
-                <tr>
-
-                  <td width="28" valign="top">
-
-                    <div style="
-                      width:22px;
-                      height:22px;
-                      line-height:22px;
-                      text-align:center;
-                      border:1px solid #CFC6B8;
-                      border-radius:50%;
-                      font-size:12px;
-                      color:#756A5B;
-                    ">
-                      ⏱
-                    </div>
-
-                  </td>
-
-                  <td style="
-                    padding-left:10px;
-                    font-size:13px;
-                    line-height:1.6;
-                    color:#666666;
-                  ">
-
-                    This verification code will expire in
-
-                    <strong style="color:#333333;">
-                      10 minutes
-                    </strong>.
-
-                  </td>
-
-                </tr>
-              </table>
-
-              <div style="
-                border-top:1px solid #EAE5DE;
-                padding-top:22px;
-              ">
-
-                <p style="
-                  margin:0;
-                  font-size:13px;
-                  line-height:1.7;
-                  color:#777777;
-                  text-align:center;
-                ">
-                  If you didn't request this verification code,
-                  you can safely ignore this email.
-                </p>
-
-              </div>
-
-            </td>
-          </tr>
-
-          <tr>
-
-            <td style="
-              background:#171717;
-              padding:25px 30px;
-              text-align:center;
-            ">
-
-              <div style="
-                font-family:Georgia, 'Times New Roman', serif;
-                font-size:16px;
-                letter-spacing:4px;
-                color:#FFFFFF;
-                margin-bottom:10px;
-              ">
-                KOVENIK
-              </div>
-
-              <p style="
-                margin:0;
-                font-size:11px;
-                line-height:1.6;
-                color:#A8A8A8;
-              ">
-                © ${new Date().getFullYear()} KOVENIK.
-                All rights reserved.
-              </p>
-
-            </td>
-
-          </tr>
-
-        </table>
-
-      </td>
-    </tr>
-  </table>
-
-</body>
-</html>
-    `,
+    template: "account_otp",
+    data: { code: otp, purpose },
   });
 };
 
@@ -985,6 +720,7 @@ const resetPassword = async ({
       SELECT
         id,
         email,
+        full_name,
         password_hash,
         auth_provider,
         is_active,
@@ -1094,6 +830,16 @@ const resetPassword = async ({
       user.id,
     ]
   );
+
+  // Security notice. Best effort: never blocks or fails the reset.
+  try {
+    await require("./notification.service").send({
+      dedupeKey: `password-changed:${user.id}:${Date.now()}`,
+      to: user.email,
+      template: "password_changed",
+      data: { name: user.full_name ? String(user.full_name).split(" ")[0] : "", changedAt: new Date() },
+    });
+  } catch (_) {}
 
   return true;
 };

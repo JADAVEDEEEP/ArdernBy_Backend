@@ -180,7 +180,53 @@ const razorpayWebhook = async (req, res) => {
   }
 };
 
+// RazorpayX payout results for COD refunds. Signed over the raw body with
+// RAZORPAYX_WEBHOOK_SECRET; 503 until that is set, 400 on a bad signature. Only a
+// "processed" payout ever marks a refund Refunded; repeats change nothing.
+const PAYOUT_EVENTS = new Set([
+  "payout.initiated",
+  "payout.queued",
+  "payout.pending",
+  "payout.processed",
+  "payout.updated",
+  "payout.failed",
+  "payout.reversed",
+  "payout.rejected",
+  "payout.creation_failed",
+]);
+
+const razorpayxWebhook = async (req, res) => {
+  const razorpayx = require("../services/razorpayx.service");
+  const codPayout = require("../services/cod-payout.service");
+
+  if (!razorpayx.isWebhookConfigured()) {
+    console.error("RazorpayX webhook received but RAZORPAYX_WEBHOOK_SECRET is not set.");
+    return res.status(503).json({ success: false, message: "Webhook is not configured." });
+  }
+  if (!razorpayx.verifyWebhookSignature(req.rawBody, req.get("x-razorpay-signature"))) {
+    console.warn("RazorpayX webhook rejected: bad signature.");
+    return res.status(400).json({ success: false, message: "Invalid signature." });
+  }
+
+  const event = req.body || {};
+  const eventId = req.get("x-razorpay-event-id") || "n/a";
+  if (!PAYOUT_EVENTS.has(event.event)) {
+    return res.status(200).json({ success: true, ignored: event.event || null });
+  }
+
+  try {
+    const outcome = await codPayout.applyWebhookEvent(event);
+    if (outcome.matched && outcome.changed) await returnService.afterRefundChange(outcome.id);
+    console.log("RazorpayX webhook | event:", eventId, "|", event.event, "|", outcome.matched ? (outcome.changed ? "updated" : "already up to date") : outcome.reason);
+    return res.status(200).json({ success: true, matched: Boolean(outcome.matched), changed: Boolean(outcome.changed) });
+  } catch (error) {
+    console.error("RazorpayX webhook failed | event:", eventId, "|", error.message);
+    return res.status(500).json({ success: false, message: "Could not process the event." });
+  }
+};
+
 module.exports = {
+  razorpayxWebhook,
   razorpayWebhook,
   createRazorpayOrder,
   verifyRazorpayPayment,

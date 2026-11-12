@@ -125,18 +125,20 @@ test("COD order: one confirmation e-mail with the order details", async () => {
   const mail = mails[0];
   assert.equal(mail.to, "asha@example.test");
   assert.equal(mail.subject, "Your KOVENIK order ARD-1001 is confirmed");
-  assert.match(mail.text, /Hello Asha,/);
-  assert.match(mail.text, /Order number: ARD-1001/);
+  assert.match(mail.text, /Hi Asha,/);
+  assert.match(mail.text, /Order: ARD-1001/);
   assert.match(mail.text, /Urban Oversized Black Tee \(Size XL, Black\) x 2 {2}₹1,290\.00/);
   assert.match(mail.text, /Subtotal: ₹1,290\.00/);
   assert.match(mail.text, /Discount \(WELCOME15\): -₹90\.00/);
   assert.match(mail.text, /Shipping: Free/);
   assert.match(mail.text, /GST: ₹65\.00/);
   assert.match(mail.text, /Total: ₹1,265\.00/);
-  assert.match(mail.text, /cash on delivery\. Please keep ₹1,265\.00 ready/);
+  assert.match(mail.text, /Please keep ₹1,265\.00 ready/);
   assert.match(mail.text, /12 Park Street/);
   assert.match(mail.text, /Pune, Maharashtra/);
-  assert.match(mail.text, /My Orders/);
+  assert.match(mail.text, /View your order: .*\/orders\/o1/);
+  assert.match(mail.html, /<!DOCTYPE html>/);
+  assert.equal(mail.from.name, "KOVENIK");
   assert.equal(log.get("order-confirmation:o1").status, "sent");
 });
 
@@ -144,7 +146,7 @@ test("online order that is paid: confirmation says paid online", async () => {
   orders.push(baseOrder({ payment_method: "online", payment_status: "Paid" }));
   await orderEmail.sendOrderConfirmation("o1");
   assert.equal(mails.length, 1);
-  assert.match(mails[0].text, /Payment: paid online/);
+  assert.match(mails[0].text, /Payment: Paid online/);
   assert.doesNotMatch(mails[0].text, /cash on delivery/);
 });
 

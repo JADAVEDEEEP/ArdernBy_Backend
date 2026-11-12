@@ -9,6 +9,7 @@ const {
 } = require("../controller/admin.controller");
 const ops = require("../controller/admin-ops.controller");
 const banners = require("../controller/banner.controller");
+const adminImages = require("../controller/admin-images.controller");
 const upload = require("../middleware/upload.middleware");
 
 const { authenticateToken } = require("../middleware/auth.middleware");
@@ -34,6 +35,10 @@ adminRouter.put("/settings/:section", writeLimiter, updateSettings);
 adminRouter.get("/alerts", getAlerts);
 
 // Review moderation (hide / unhide, reason required, audited).
+// AI product images: list + one-click regenerate
+adminRouter.get("/images", adminImages.listProductImages);
+adminRouter.post("/images/:productId/regenerate", writeLimiter, adminImages.regenerateImage);
+
 adminRouter.get("/reviews", ops.listReviews);
 adminRouter.patch("/reviews/:reviewId/moderation", writeLimiter, ops.moderateReview);
 
@@ -46,6 +51,7 @@ adminRouter.patch("/returns/:id/receive", writeLimiter, ops.receiveReturn);
 adminRouter.patch("/returns/:id/inspect", writeLimiter, ops.inspectReturn);
 adminRouter.post("/returns/:id/refund", writeLimiter, ops.refundReturn);
 adminRouter.post("/returns/:id/refund-retry", writeLimiter, ops.retryReturnRefund);
+adminRouter.post("/returns/:id/payout-check", writeLimiter, ops.checkReturnPayout);
 adminRouter.post("/returns/:id/refund-check", writeLimiter, refundSync.checkReturn);
 adminRouter.get("/returns-options", ops.returnOptions);
 adminRouter.get("/reports/returns", ops.returnsAnalytics);

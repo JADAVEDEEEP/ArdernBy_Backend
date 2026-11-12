@@ -41,7 +41,7 @@ test("validate cleans fields and rejects bad input", () => {
 test("a valid message is e-mailed to the configured inbox with Reply-To", async () => {
   sent.length = 0;
   await support.submit(good, deps());
-  assert.equal(sent.length, 1);
+  assert.equal(sent.length, 2); // inbox message + customer confirmation
   assert.equal(sent[0].to, "inbox@example.test");
   assert.equal(sent[0].replyTo.address, "asha@example.com");
   assert.match(sent[0].subject, /Where is my order/);
@@ -78,7 +78,7 @@ test("HTTP: validation 400, unconfigured 503, honeypot silent, rate limit 429", 
     process.env.SUPPORT_INBOX_EMAIL = "inbox@example.test";
     const ok = await post(good);
     assert.equal(ok.status, 201);
-    assert.equal(sent.length, 1);
+    assert.equal(sent.length, 2); // inbox message + customer confirmation
     let limited = false;
     for (let i = 0; i < 6; i += 1) if ((await post(good)).status === 429) limited = true;
     assert.ok(limited);

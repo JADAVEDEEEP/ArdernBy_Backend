@@ -9,6 +9,8 @@ const payStatus = require("../utils/payment-status");
 const {
   calculateCouponDiscount,
   calculateOrderTotals,
+  isCodAllowed,
+  COD_LIMIT_MESSAGE,
 } = require("../utils/pricing");
 
 // ==========================================
@@ -212,8 +214,11 @@ const createOrder = async ({
 
     // Same rules as the cart drawer / checkout (utils/pricing.js).
     const {
+      taxableAmount,
       shippingAmount,
       taxAmount,
+      codFee,
+      codFeeTax,
       totalAmount,
     } = calculateOrderTotals(
       subtotal,
@@ -225,8 +230,20 @@ const createOrder = async ({
             maxTotalDiscountPercent: memberPricing.maxTotalDiscountPercent,
           })
         : discountAmount,
-      { freeShipping: memberPricing.member?.freeDelivery === true }
+      {
+        freeShipping: memberPricing.member?.freeDelivery === true,
+        cod: !isOnline,
+      }
     );
+
+    // COD limit, enforced here as well as in the browser: the cart is recomputed
+    // from the database, so a hand-made API call cannot get around it.
+    if (!isOnline && !isCodAllowed(taxableAmount)) {
+      const limitError = new Error(COD_LIMIT_MESSAGE);
+      limitError.statusCode = 400;
+      limitError.code = "COD_LIMIT_EXCEEDED";
+      throw limitError;
+    }
 
     // --------------------------------------
     // 9. CREATE ORDER
@@ -274,10 +291,14 @@ const createOrder = async ({
           shipping_address,
           shipping_city,
           shipping_state,
+          cod_fee,
+          cod_fee_tax,
           created_at,
           updated_at
         )
         VALUES (
+          ?,
+          ?,
           ?,
           ?,
           ?,
@@ -320,6 +341,8 @@ const createOrder = async ({
         shippingAddress.address,
         shippingAddress.city,
         shippingAddress.state,
+        codFee,
+        codFeeTax,
       ]
     );
 
@@ -463,6 +486,8 @@ const createOrder = async ({
       shippingAmount,
       discountAmount,
       taxAmount,
+      codFee,
+      codFeeTax,
       totalAmount,
       couponCode: cart.coupon_code || null,
     };
@@ -496,6 +521,8 @@ const getMyOrders = async (userId) => {
         shipping_amount,
         discount_amount,
         tax_amount,
+        cod_fee,
+        cod_fee_tax,
         total_amount,
         coupon_code,
         created_at,
@@ -574,6 +601,8 @@ const getOrderById = async (userId, orderId) => {
         shipping_amount,
         discount_amount,
         tax_amount,
+        cod_fee,
+        cod_fee_tax,
         total_amount,
         coupon_code,
         shipping_name,
@@ -1487,6 +1516,8 @@ const getAllOrders = async () => {
         shipping_amount,
         discount_amount,
         tax_amount,
+        cod_fee,
+        cod_fee_tax,
         total_amount,
         coupon_code,
         shipping_name,
@@ -1708,6 +1739,12 @@ const updateOrderStatus = async (
     // The return window starts from this moment.
     if (status === "Delivered" && !sameStatus(current.status, "Delivered")) {
       await deliveryDate.recordDelivered(pool, orderId, actorId);
+    }
+
+    // Customer e-mail for the two milestones they care about. Once per order and
+    // milestone (dedupe key); fire-and-forget, never affects the status change.
+    if ((status === "Shipped" || status === "Delivered") && !sameStatus(current.status, status)) {
+      require("./order-email.service").sendOrderStatusEmail(orderId, status);
     }
   }
 

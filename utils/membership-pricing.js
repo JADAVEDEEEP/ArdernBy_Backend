@@ -3,8 +3,17 @@ const { roundMoney } = require("./pricing");
 
 const DEFAULT_MAX_TOTAL_DISCOUNT_PERCENT = 60;
 
-// price = current selling price (sale price already applied), mrp = list price.
+// price = current selling price (a sale price is already applied), mrp = list price.
 // rule = optional { eligible, member_price } for (plan, product). Never returns more than price.
+//
+// The member discount is an ADDITIONAL percentage off the CURRENT SELLING PRICE, so it applies
+// on sale items too (selling price 1000 -> member price 850 at 15%). It is applied exactly once:
+// `price` here is the product's own selling price, never an already-member-discounted one.
+// A fixed per-product member price (admin rule) replaces the percentage, it is not added to it.
+//
+// Limit: sale + member (and, in capCouponDiscount below, coupons) can never take more than
+// maxTotalDiscountPercent off the list price, so on a deeply discounted item the member price
+// stops at that floor.
 const memberUnitPrice = ({ price, mrp, discountPercent, rule, maxTotalDiscountPercent }) => {
   const base = roundMoney(Number(price));
   if (rule && Number(rule.eligible) === 0) return base;
@@ -16,7 +25,6 @@ const memberUnitPrice = ({ price, mrp, discountPercent, rule, maxTotalDiscountPe
 
   let result = Math.min(base, candidate);
 
-  // Sale + membership may never take more than the cap off the list price.
   const list = Number(mrp);
   const cap = Number(maxTotalDiscountPercent ?? DEFAULT_MAX_TOTAL_DISCOUNT_PERCENT);
   if (Number.isFinite(list) && list > 0 && Number.isFinite(cap)) {

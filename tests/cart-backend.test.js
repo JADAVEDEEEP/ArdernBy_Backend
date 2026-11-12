@@ -148,7 +148,7 @@ test("coupon response totals match order totals (GST once, no double count)", as
         : coupon.discount_value,
       subtotal
     );
-    const shipping = subtotal >= 999 ? 0 : 79;
+    const shipping = 49; // flat for non-members, no free-shipping threshold
     const gst = Math.round((subtotal - discount) * 0.05);
 
     assert.equal(res.body.subtotal, subtotal);

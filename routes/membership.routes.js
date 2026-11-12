@@ -8,7 +8,7 @@ const membershipRouter = express.Router();
 
 // Anyone can browse the plans.
 membershipRouter.get("/plans", c.getPlans);
-// Entry-tier price per product, for guests / non-members (display only).
+// KOVENIK MEMBER price per product, for guests / non-members (display only).
 membershipRouter.get("/preview-pricing", rateLimit({ windowMs: 60 * 1000, max: 60, message: "Too many requests. Please wait a moment." }), c.getPreviewPricing);
 
 // Everything else needs a signed-in customer.

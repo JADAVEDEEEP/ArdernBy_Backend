@@ -18,18 +18,30 @@ const { calculateOrderTotals } = require("../utils/pricing");
 
 // ---------------- pure rules ----------------
 
-test("member price: percentage, rule override, exclusion, never above price", () => {
-  assert.equal(memberUnitPrice({ price: 1000, mrp: 1000, discountPercent: 12 }), 880);
-  assert.equal(memberUnitPrice({ price: 1000, mrp: 1000, discountPercent: 12, rule: { eligible: 0 } }), 1000);
-  assert.equal(memberUnitPrice({ price: 1000, mrp: 1000, discountPercent: 12, rule: { eligible: 1, member_price: 700 } }), 700);
-  assert.equal(memberUnitPrice({ price: 1000, mrp: 1000, discountPercent: 12, rule: { eligible: 1, member_price: 1500 } }), 1000);
+test("member price: 15% off the selling price, rule override, exclusion, never above price", () => {
+  assert.equal(memberUnitPrice({ price: 1000, mrp: 1000, discountPercent: 15 }), 850);
+  assert.equal(memberUnitPrice({ price: 1000, mrp: 1000, discountPercent: 15, rule: { eligible: 0 } }), 1000);
+  assert.equal(memberUnitPrice({ price: 1000, mrp: 1000, discountPercent: 15, rule: { eligible: 1, member_price: 700 } }), 700);
+  assert.equal(memberUnitPrice({ price: 1000, mrp: 1000, discountPercent: 15, rule: { eligible: 1, member_price: 1500 } }), 1000);
 });
 
-test("member price: sale + membership cannot pass the total discount cap", () => {
-  // list 1000, sale already 450 (55% off). 12% more would be 396 -> cap 60% keeps it >= 400.
-  assert.equal(memberUnitPrice({ price: 450, mrp: 1000, discountPercent: 12, maxTotalDiscountPercent: 60 }), 400);
-  // Already below the cap floor: member gets nothing extra, never a price increase.
-  assert.equal(memberUnitPrice({ price: 300, mrp: 1000, discountPercent: 12, maxTotalDiscountPercent: 60 }), 300);
+test("member price applies on top of a sale price (additional 15%), once", () => {
+  // The four live products: selling price / MRP.
+  assert.equal(memberUnitPrice({ price: 1000, mrp: 1200, discountPercent: 15 }), 850);
+  assert.equal(memberUnitPrice({ price: 1199, mrp: 1799, discountPercent: 15 }), 1019.15);
+  assert.equal(memberUnitPrice({ price: 899, mrp: 1399, discountPercent: 15 }), 764.15);
+  assert.equal(memberUnitPrice({ price: 1290, mrp: 1380, discountPercent: 15 }), 1096.5);
+  // Applying it to its own result is the caller's bug; the function is not idempotent by design,
+  // so the callers must always pass the product's selling price (covered by the cart/order tests).
+});
+
+test("member price: the 60% total discount cap floors the price", () => {
+  // list 1000, selling 450 (55% off). 15% more would be 382.5 -> cap 60% keeps it at 400.
+  assert.equal(memberUnitPrice({ price: 450, mrp: 1000, discountPercent: 15, maxTotalDiscountPercent: 60 }), 400);
+  // Already below the floor: member gets nothing extra, never a price increase.
+  assert.equal(memberUnitPrice({ price: 300, mrp: 1000, discountPercent: 15, maxTotalDiscountPercent: 60 }), 300);
+  // A fixed member price below the floor is lifted to it.
+  assert.equal(memberUnitPrice({ price: 900, mrp: 1000, discountPercent: 15, rule: { eligible: 1, member_price: 100 }, maxTotalDiscountPercent: 60 }), 400);
 });
 
 test("coupon is trimmed so sale + member + coupon stay inside the cap", () => {
@@ -38,22 +50,25 @@ test("coupon is trimmed so sale + member + coupon stay inside the cap", () => {
   assert.equal(capCouponDiscount({ couponDiscount: 50, listSubtotal: 1000, payableSubtotal: 300, maxTotalDiscountPercent: 60 }), 0);
 });
 
-test("Gold free shipping waives the fee; others still pay under the threshold", () => {
-  assert.equal(calculateOrderTotals(500, 0).shippingAmount, 79);
-  assert.equal(calculateOrderTotals(500, 0, { freeShipping: true }).shippingAmount, 0);
+test("shipping: flat Rs 49 for non-members at ANY order value, free for members", () => {
+  for (const subtotal of [1, 500, 998, 999, 1000, 5000, 100000]) {
+    assert.equal(calculateOrderTotals(subtotal, 0).shippingAmount, 49, `subtotal ${subtotal}`);
+    assert.equal(calculateOrderTotals(subtotal, 0, { freeShipping: true }).shippingAmount, 0);
+    // A coupon never changes the shipping rule.
+    assert.equal(calculateOrderTotals(subtotal, 10).shippingAmount, 49);
+  }
+  assert.equal(calculateOrderTotals(0, 0).shippingAmount, 0);
+  assert.equal(calculateOrderTotals(1000, 0).totalAmount, 1000 + 49 + 50);
 });
 
-test("purchase policy: new / renew / upgrade / blocked", () => {
+test("purchase policy: new / renew / blocked (no tiers)", () => {
   const now = new Date("2026-11-02T00:00:00Z");
   const end = new Date(now.getTime() + 100 * DAY);
-  const silver = { tier_rank: 2, end_date: end };
-  assert.equal(decidePurchase({ current: null, queued: null, target: { tier_rank: 1 }, now }).action, "new");
-  const renew = decidePurchase({ current: silver, queued: null, target: { tier_rank: 2 }, now });
+  assert.equal(decidePurchase({ current: null, queued: null, now }).action, "new");
+  const renew = decidePurchase({ current: { end_date: end }, queued: null, now });
   assert.equal(renew.action, "renew");
   assert.equal(renew.startDate.getTime(), end.getTime());
-  assert.equal(decidePurchase({ current: silver, queued: { tier_rank: 2 }, target: { tier_rank: 2 }, now }).action, "blocked");
-  assert.equal(decidePurchase({ current: silver, queued: null, target: { tier_rank: 3 }, now }).action, "upgrade");
-  assert.equal(decidePurchase({ current: silver, queued: null, target: { tier_rank: 1 }, now }).action, "blocked");
+  assert.equal(decidePurchase({ current: { end_date: end }, queued: { end_date: end }, now }).action, "blocked");
 });
 
 // ---------------- service against an in-memory store ----------------
@@ -71,10 +86,13 @@ const planRow = (id, name, rank, price, pct, free) => ({
 
 const reset = () => {
   state.plans = [
-    planRow("p-bronze", "Bronze", 1, "99.00", "5.00", 0),
-    planRow("p-silver", "Silver", 2, "199.00", "8.00", 0),
-    planRow("p-gold", "Gold", 3, "399.00", "12.00", 1),
+    // Retired tiers (hidden from customers, still referenced by old subscriptions).
+    { ...planRow("p-bronze", "Bronze", 1, "99.00", "5.00", 0), active: 0 },
+    { ...planRow("p-silver", "Silver", 2, "199.00", "8.00", 0), active: 0 },
+    { ...planRow("p-gold", "Gold", 3, "399.00", "12.00", 1), active: 0 },
     { ...planRow("p-legacy", "Plus", 0, "99.00", "5.00", 0) },
+    // The one plan customers can buy.
+    { ...planRow("p-member", "KOVENIK MEMBER", 10, "199.00", "15.00", 0), slug: "kovenik-member" },
   ];
   state.subs = [];
   state.rules = [];
@@ -97,6 +115,7 @@ const run = async (sql, p = []) => {
   if (t.includes("from subscription_plans p where")) {
     let rows = state.plans.filter((x) => x.tier_rank > 0);
     if (t.includes("p.active = 1")) rows = rows.filter((x) => x.active);
+    if (t.includes("p.slug = 'kovenik-member'")) rows = rows.filter((x) => x.slug === "kovenik-member");
     if (t.includes("p.id = ?")) rows = rows.filter((x) => x.id === p[0]);
     return [rows.sort((a, b) => a.tier_rank - b.tier_rank)];
   }
@@ -202,7 +221,7 @@ const membership = require("../services/membership.service");
 const sign = (orderId, paymentId) =>
   crypto.createHmac("sha256", "unit_secret").update(`${orderId}|${paymentId}`).digest("hex");
 
-const buy = async (userId, slug) => {
+const buy = async (userId, slug = "kovenik-member") => {
   const plan = state.plans.find((p) => p.slug === slug);
   return membership.startPurchase({ userId, planId: plan.id });
 };
@@ -213,33 +232,41 @@ const pay = (userId, order, paymentId) =>
     razorpayPaymentId: paymentId,
     signature: sign(order.razorpayOrderId, paymentId),
   });
+const addTerm = (id, planId, { from = -1, to = 100 } = {}) => {
+  const now = Date.now();
+  state.subs.push({ id, user_id: USER, plan_id: planId, status: "active", start_date: new Date(now + from * DAY),
+    end_date: new Date(now + to * DAY), payment_status: "paid", created_at: new Date(now + from * DAY) });
+};
 
-test("plans: only active membership tiers are listed (legacy plans are not)", async () => {
+test("plans: customers see only KOVENIK MEMBER, never the retired tiers", async () => {
   reset();
-  state.plans.find((p) => p.slug === "silver").active = 0;
   const plans = await membership.getPublicPlans();
-  assert.deepEqual(plans.map((p) => p.slug), ["bronze", "gold"]);
+  assert.deepEqual(plans.map((p) => [p.slug, p.name, p.price, p.discountPercent]), [["kovenik-member", "KOVENIK MEMBER", 199, 15]]);
 });
 
-test("each tier: order amount comes from the plan, payment activates for 365 days", async () => {
-  for (const [slug, rupees] of [["bronze", 99], ["silver", 199], ["gold", 399]]) {
-    reset();
-    const order = await buy(USER, slug);
-    assert.equal(order.amount, rupees * 100);
-    assert.equal(state.subs[0].status, "pending");
+test("a retired tier cannot be bought any more", async () => {
+  reset();
+  await assert.rejects(buy(USER, "gold"), /not available/i);
+  await assert.rejects(buy(USER, "bronze"), /not available/i);
+  assert.equal(state.subs.length, 0);
+});
 
-    const result = await pay(USER, order, "pay_1");
-    assert.equal(result.outcome, "activated");
-    assert.equal(state.subs[0].status, "active");
-    assert.equal(state.subs[0].payment_status, "paid");
-    const days = Math.round((state.subs[0].end_date - state.subs[0].start_date) / DAY);
-    assert.equal(days, 365);
-  }
+test("purchase: order amount comes from the plan (Rs 199), payment activates for 365 days", async () => {
+  reset();
+  const order = await buy(USER);
+  assert.equal(order.amount, 19900);
+  assert.equal(state.subs[0].status, "pending");
+
+  const result = await pay(USER, order, "pay_1");
+  assert.equal(result.outcome, "activated");
+  assert.equal(state.subs[0].status, "active");
+  assert.equal(state.subs[0].payment_status, "paid");
+  assert.equal(Math.round((state.subs[0].end_date - state.subs[0].start_date) / DAY), 365);
 });
 
 test("a bad signature never activates and marks the attempt failed", async () => {
   reset();
-  const order = await buy(USER, "gold");
+  const order = await buy(USER);
   await assert.rejects(
     membership.verifyPurchase({ userId: USER, razorpayOrderId: order.razorpayOrderId, razorpayPaymentId: "pay_x", signature: "deadbeef" }),
     /verification failed/i
@@ -250,15 +277,15 @@ test("a bad signature never activates and marks the attempt failed", async () =>
 
 test("another customer cannot settle someone else's order", async () => {
   reset();
-  const order = await buy(USER, "gold");
+  const order = await buy(USER);
   await assert.rejects(pay(OTHER, order, "pay_1"), /does not match/i);
   assert.equal(state.subs[0].status, "pending");
 });
 
 test("duplicate attempts: double click reuses the order; double verify activates once", async () => {
   reset();
-  const first = await buy(USER, "silver");
-  const second = await buy(USER, "silver");
+  const first = await buy(USER);
+  const second = await buy(USER);
   assert.equal(second.razorpayOrderId, first.razorpayOrderId);
   assert.equal(razorCalls.orders.length, 1);
   assert.equal(state.subs.length, 1);
@@ -271,14 +298,14 @@ test("duplicate attempts: double click reuses the order; double verify activates
 
 test("webhook settles a paid order exactly once and checks the amount", async () => {
   reset();
-  const order = await buy(USER, "gold");
+  const order = await buy(USER);
   const wrong = await membership.settleWebhookPayment({ razorpayOrderId: order.razorpayOrderId, paymentId: "pay_1", amountPaise: 100 });
   assert.equal(wrong.reason, "amount_mismatch");
   assert.equal(state.subs[0].status, "pending");
 
-  const ok = await membership.settleWebhookPayment({ razorpayOrderId: order.razorpayOrderId, paymentId: "pay_1", amountPaise: 39900 });
+  const ok = await membership.settleWebhookPayment({ razorpayOrderId: order.razorpayOrderId, paymentId: "pay_1", amountPaise: 19900 });
   assert.equal(ok.outcome, "activated");
-  const again = await membership.settleWebhookPayment({ razorpayOrderId: order.razorpayOrderId, paymentId: "pay_1", amountPaise: 39900 });
+  const again = await membership.settleWebhookPayment({ razorpayOrderId: order.razorpayOrderId, paymentId: "pay_1", amountPaise: 19900 });
   assert.equal(again.outcome, "already_active");
 
   const unknown = await membership.settleWebhookPayment({ razorpayOrderId: "order_shop", paymentId: "pay_9", amountPaise: 100 });
@@ -287,87 +314,119 @@ test("webhook settles a paid order exactly once and checks the amount", async ()
 
 test("sync activates when Razorpay says captured (customer closed the tab)", async () => {
   reset();
-  const order = await buy(USER, "bronze");
-  paymentsForOrder = [{ id: "pay_7", status: "captured", amount: 9900 }];
+  const order = await buy(USER);
+  paymentsForOrder = [{ id: "pay_7", status: "captured", amount: 19900 }];
   const result = await membership.syncPurchase({ userId: USER, razorpayOrderId: order.razorpayOrderId });
   assert.equal(result.activated, true);
 });
 
 test("renewal queues behind the current term; a second renewal is refused", async () => {
   reset();
-  await pay(USER, await buy(USER, "silver"), "pay_1");
-  const renewal = await buy(USER, "silver");
+  await pay(USER, await buy(USER), "pay_1");
+  const renewal = await buy(USER);
   assert.equal(renewal.action, "renew");
   await pay(USER, renewal, "pay_2");
 
   const [current, queued] = state.subs.filter((s) => s.status === "active");
   assert.equal(queued.start_date.getTime(), current.end_date.getTime());
-  await assert.rejects(buy(USER, "silver"), /already renewed/i);
+  await assert.rejects(buy(USER), /already renewed/i);
 });
 
-test("upgrade starts now and ends the lower term; downgrade is refused", async () => {
+test("a customer on an old Gold term renews into KOVENIK MEMBER after it, nothing is cut short", async () => {
   reset();
-  await pay(USER, await buy(USER, "silver"), "pay_1");
-  await assert.rejects(buy(USER, "bronze"), /higher membership/i);
-
-  const upgrade = await buy(USER, "gold");
-  assert.equal(upgrade.action, "upgrade");
-  await pay(USER, upgrade, "pay_2");
-  const byPlan = Object.fromEntries(state.subs.map((s) => [s.plan_id, s.status]));
-  assert.equal(byPlan["p-silver"], "expired");
-  assert.equal(byPlan["p-gold"], "active");
+  addTerm("gold-term", "p-gold", { from: -10, to: 200 });
+  const renewal = await buy(USER);
+  assert.equal(renewal.action, "renew");
+  await pay(USER, renewal, "pay_new");
+  const gold = state.subs.find((s) => s.id === "gold-term");
+  const member = state.subs.find((s) => s.plan_id === "p-member");
+  assert.equal(gold.status, "active");
+  assert.equal(member.start_date.getTime(), gold.end_date.getTime());
 });
 
 test("a paid order that can no longer be honoured is refunded, not activated", async () => {
   reset();
-  const silverOrder = await buy(USER, "silver");
-  // While paying, the customer buys Gold in another tab.
-  await pay(USER, await buy(USER, "gold"), "pay_gold");
-  await assert.rejects(pay(USER, silverOrder, "pay_silver"), /refunded/i);
-  assert.deepEqual(razorCalls.refunds, [{ paymentId: "pay_silver", amount: 199 }]);
-  assert.equal(state.subs.find((s) => s.plan_id === "p-silver").payment_status, "refunded");
+  // Current term + an already queued renewal; a third paid order must be refunded.
+  addTerm("current", "p-member", { from: -1, to: 100 });
+  addTerm("queued", "p-member", { from: 100, to: 465 });
+  state.subs.push({ id: "extra", user_id: USER, plan_id: "p-member", status: "pending", payment_status: "created",
+    razorpay_order_id: "order_x", amount: "199.00", created_at: new Date() });
+  const result = await membership.settleWebhookPayment({ razorpayOrderId: "order_x", paymentId: "pay_c", amountPaise: 19900 });
+  assert.equal(result.outcome, "refunded");
+  assert.deepEqual(razorCalls.refunds, [{ paymentId: "pay_c", amount: "199.00" }]);
+  assert.equal(state.subs.find((s) => s.id === "extra").payment_status, "refunded");
 });
 
-test("expiry: past-end terms stop counting as current and the sweep closes them", async () => {
+test("expiry: past-end terms stop counting as current", async () => {
   reset();
-  const now = Date.now();
-  state.subs.push({ id: "old", user_id: USER, plan_id: "p-gold", status: "active", start_date: new Date(now - 400 * DAY),
-    end_date: new Date(now - DAY), payment_status: "paid", created_at: new Date(now - 400 * DAY) });
+  addTerm("old", "p-member", { from: -400, to: -1 });
   assert.equal(await membership.getMemberContext(pool, USER), null);
-
-  state.subs.push({ id: "live", user_id: USER, plan_id: "p-silver", status: "active", start_date: new Date(now - DAY),
-    end_date: new Date(now + 100 * DAY), payment_status: "paid", created_at: new Date(now - DAY) });
+  addTerm("live", "p-member", { from: -1, to: 100 });
   const ctx = await membership.getMemberContext(pool, USER);
-  assert.equal(ctx.planSlug, "silver");
+  assert.equal(ctx.planSlug, "kovenik-member");
 });
 
-test("pricing per tier: Bronze 5%, Silver 8%, Gold 12% + free shipping; guests pay full", async () => {
+test("pricing: KOVENIK MEMBER gets a flat 15%; guests pay full", async () => {
   const lines = [{ productId: "x", price: 1000, mrp: 1000 }];
-  for (const [slug, expected, free] of [["bronze", 950, false], ["silver", 920, false], ["gold", 880, true]]) {
-    reset();
-    const plan = state.plans.find((p) => p.slug === slug);
-    const now = Date.now();
-    state.subs.push({ id: slug, user_id: USER, plan_id: plan.id, status: "active", start_date: new Date(now - DAY), end_date: new Date(now + DAY) });
-    const priced = await membership.priceLines(pool, USER, lines);
-    assert.equal(priced.unitPrices[0], expected);
-    assert.equal(priced.member.freeDelivery, free);
-  }
+  reset();
+  addTerm("m", "p-member");
+  const priced = await membership.priceLines(pool, USER, lines);
+  assert.equal(priced.unitPrices[0], 850);
+  assert.equal(priced.member.discountPercent, 15);
+  assert.equal(priced.member.freeDelivery, true, "every active member ships free");
+
   reset();
   const guest = await membership.priceLines(pool, null, lines);
   assert.equal(guest.member, null);
   assert.equal(guest.unitPrices[0], 1000);
 });
 
+test("pricing: sale items get the additional 15% on the selling price", async () => {
+  reset();
+  addTerm("m", "p-member");
+  const priced = await membership.priceLines(pool, USER, [
+    { productId: "a", price: 900, mrp: 1000 }, // 10% sale -> 765
+    { productId: "b", price: 700, mrp: 1000 }, // 30% sale -> 595
+    { productId: "c", price: 450, mrp: 1000 }, // 55% sale -> 15% more would break the 60% cap -> 400
+  ]);
+  assert.deepEqual(priced.unitPrices, [765, 595, 400]);
+});
+
+test("old tier terms are honoured as KOVENIK MEMBER: at least 15%, old Gold keeps free shipping", async () => {
+  const lines = [{ productId: "x", price: 1000, mrp: 1000 }];
+  for (const [plan, free] of [["p-bronze", true], ["p-silver", true], ["p-gold", true]]) {
+    reset();
+    addTerm("legacy", plan);
+    const priced = await membership.priceLines(pool, USER, lines);
+    assert.equal(priced.unitPrices[0], 850);
+    assert.equal(priced.member.freeDelivery, free);
+    assert.equal(priced.member.planName, "KOVENIK MEMBER");
+  }
+});
+
+test("old tier terms are never made worse if the member plan is not live yet", async () => {
+  reset();
+  state.plans = state.plans.filter((p) => p.slug !== "kovenik-member");
+  addTerm("legacy", "p-gold");
+  const priced = await membership.priceLines(pool, USER, [{ productId: "x", price: 1000, mrp: 1000 }]);
+  assert.equal(priced.unitPrices[0], 880); // their own 12% until the new plan exists
+  assert.equal(priced.member.freeDelivery, true);
+});
+
 test("admin product rules: an excluded product keeps its regular price", async () => {
   reset();
-  const now = Date.now();
-  state.subs.push({ id: "g", user_id: USER, plan_id: "p-gold", status: "active", start_date: new Date(now - DAY), end_date: new Date(now + DAY) });
-  state.rules.push({ plan_id: "p-gold", product_id: "excluded", eligible: 0, member_price: null });
-  state.rules.push({ plan_id: "p-gold", product_id: "fixed", eligible: 1, member_price: "700.00" });
+  addTerm("m", "p-member");
+  state.rules.push({ plan_id: "p-member", product_id: "excluded", eligible: 0, member_price: null });
+  state.rules.push({ plan_id: "p-member", product_id: "fixed", eligible: 1, member_price: "700.00" });
   const priced = await membership.priceLines(pool, USER, [
     { productId: "excluded", price: 1000, mrp: 1000 },
     { productId: "fixed", price: 1000, mrp: 1000 },
     { productId: "normal", price: 1000, mrp: 1000 },
   ]);
-  assert.deepEqual(priced.unitPrices, [1000, 700, 880]);
+  assert.deepEqual(priced.unitPrices, [1000, 700, 850]);
+});
+
+test("admin cannot create a second plan", async () => {
+  reset();
+  await assert.rejects(membership.adminSavePlan({ input: { name: "Platinum", slug: "platinum" }, req: {} }), /single membership plan/i);
 });

@@ -1,5 +1,5 @@
 const { poolPromise } = require("../config/sql");
-const { FREE_SHIPPING_THRESHOLD, SHIPPING_FEE, GST_RATE } = require("../utils/pricing");
+const { SHIPPING_FEE, GST_RATE } = require("../utils/pricing");
 
 // ==========================================
 // ADMIN SETTINGS
@@ -172,8 +172,9 @@ const readOnlyConfig = () => ({
   currency: "INR",
   timezone: "Asia/Kolkata",
   shipping: {
-    freeShippingThreshold: FREE_SHIPPING_THRESHOLD,
+    // Temporary flat fee; active KOVENIK members ship free; there is no order-value threshold.
     shippingFee: SHIPPING_FEE,
+    freeForMembers: true,
     gstRate: GST_RATE,
   },
   orderStatuses: ["Pending", "Confirmed", "Processing", "Shipped", "Delivered", "Cancelled", "Returned"],

@@ -40,6 +40,10 @@ const refundTotals = async (executor, orderId) => {
   let completedPaise = 0;
   let openPaise = 0;
   let hasRecords = false;
+  // COD fee (and GST on it) already paid back on completed seller-fault returns. The order's
+  // "everything refundable was paid back" threshold already leaves the fee out, so what was
+  // refunded of it is taken out of the paid-back total again to compare like with like.
+  let feeBackPaise = 0;
 
   for (const table of ["order_cancellations", "return_requests"]) {
     try {
@@ -54,16 +58,28 @@ const refundTotals = async (executor, orderId) => {
         if (row.refund_status === "completed") completedPaise += paise;
         else if (OPEN.includes(row.refund_status)) openPaise += paise;
       }
+      if (table === "return_requests") {
+        try {
+          const [fees] = await executor.execute(
+            "SELECT refund_cod_fee FROM return_requests WHERE order_id = ? AND refund_status = 'completed' AND refund_cod_fee IS NOT NULL",
+            [orderId]
+          );
+          for (const fee of fees) feeBackPaise += calc.toPaise(fee.refund_cod_fee || 0);
+        } catch (error) {
+          // The column only exists after the seller-fault database update; nothing to subtract before it.
+          if (!(error && (error.code === "ER_BAD_FIELD_ERROR" || error.errno === 1054))) throw error;
+        }
+      }
     } catch (error) {
       if (!isMissingTable(error)) throw error;
     }
   }
-  return { completedPaise, openPaise, hasRecords };
+  return { completedPaise: completedPaise - feeBackPaise, openPaise, hasRecords };
 };
 
 const syncOrderPayment = async (executor, orderId) => {
   const [orders] = await executor.execute(
-    "SELECT status, payment_status, total_amount FROM orders WHERE id = ? LIMIT 1",
+    "SELECT status, payment_status, total_amount, cod_fee, cod_fee_tax FROM orders WHERE id = ? LIMIT 1",
     [orderId]
   );
   const order = orders[0];
@@ -73,7 +89,12 @@ const syncOrderPayment = async (executor, orderId) => {
   const next = nextPaymentStatus({
     orderStatus: order.status,
     paymentStatus: order.payment_status,
-    totalPaise: calc.toPaise(order.total_amount),
+    // The COD handling fee (and its GST) is never refunded, so "everything
+    // refundable was paid back" is measured without it.
+    totalPaise:
+      calc.toPaise(order.total_amount) -
+      calc.toPaise(order.cod_fee) -
+      calc.toPaise(order.cod_fee_tax),
     ...totals,
   });
 

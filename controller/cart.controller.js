@@ -187,17 +187,32 @@ const updateCartCoupon = async (req, res) => {
       coupon_code
     );
 
+    const memberPricing = await membershipService.priceCart(
+      userId,
+      cart.items || [],
+      coupon_code
+    );
+    // For an active member the top-level totals must be the member totals (member prices, free
+    // shipping), the same numbers order creation will use, not the regular-customer ones.
+    const memberTotals = memberPricing?.totals
+      ? {
+          subtotal: memberPricing.totals.subtotal,
+          discount: memberPricing.totals.discountAmount,
+          taxableAmount: memberPricing.totals.taxableAmount,
+          shipping: memberPricing.totals.shippingAmount,
+          tax: memberPricing.totals.taxAmount,
+          total: memberPricing.totals.totalAmount,
+        }
+      : {};
+
     return res.status(200).json({
       success: true,
       message: coupon_code
         ? "Coupon applied to cart successfully."
         : "Coupon removed from cart successfully.",
       ...cart,
-      memberPricing: await membershipService.priceCart(
-        userId,
-        cart.items || [],
-        coupon_code
-      ),
+      ...memberTotals,
+      memberPricing,
     });
   } catch (error) {
     console.error("Update cart coupon error:", error.message);

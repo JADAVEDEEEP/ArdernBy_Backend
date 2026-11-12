@@ -1,6 +1,10 @@
 const mysql = require("mysql2/promise");
+const { buildSslOption } = require("./db-ssl");
+
+const ssl = buildSslOption();
 
 const pool = mysql.createPool({
+  ...(ssl ? { ssl } : {}),
   host: process.env.DB_HOST || "localhost",
   port: Number(process.env.DB_PORT || 3306),
   user: process.env.DB_USER || "root",
@@ -17,6 +21,15 @@ const poolPromise = (async () => {
 
     console.log("✅ MySQL connected");
     console.log("📦 Database:", process.env.DB_NAME || "ardenby");
+
+    // Safe TLS check: logs only the cipher name, never credentials. Never blocks startup.
+    try {
+      const [rows] = await connection.query("SHOW SESSION STATUS LIKE 'Ssl_cipher'");
+      const cipher = rows[0] && rows[0].Value;
+      console.log(cipher ? `🔒 DB TLS: on (${cipher})` : "⚠️ DB TLS: off (set DB_SSL=required or verify)");
+    } catch (_) {
+      console.log("ℹ️ DB TLS status could not be read");
+    }
 
     connection.release();
     return pool;

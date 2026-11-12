@@ -33,8 +33,12 @@ const run = async (sql, p = []) => {
     return [state.product ? [{ ...state.product }] : []];
   }
   if (t.startsWith("select id from products where id = ?")) return [[{ id: "p1" }]];
+  if (t.startsWith("update products set inventory = ( select")) {
+    state.product.inventory = state.variants.reduce((n, v) => n + Math.max(0, v.inventory), 0);
+    return [{ affectedRows: 1 }];
+  }
   if (t.startsWith("update products set")) {
-    Object.assign(state.product, { slug: p[0], name: p[1], price: p[7], mrp: p[8], best_price: p[9], inventory: p[20] });
+    Object.assign(state.product, { slug: p[0], name: p[1], price: p[7], mrp: p[8], best_price: p[9], });
     return [{ affectedRows: 1 }];
   }
   if (t.startsWith("select id, size, color, inventory from product_variants")) {
@@ -180,4 +184,36 @@ test("the service still works when no actor is given (existing callers)", async 
   await productService.updateProduct("p1", baseEdit({ price: 1100 }), []);
   assert.equal(state.audit.length, 0);
   assert.equal(state.movements.length, 0);
+});
+
+test("product stock is always the sum of variant stock, whatever the client sends", async () => {
+  await productService.updateProduct(
+    "p1",
+    baseEdit({
+      inventory: 999,
+      variants: [
+        { id: "v1", size: "M", color: "Black", inventory: 0 },
+        { id: "v2", size: "L", color: "Black", inventory: 5 },
+        { size: "XL", color: "Black", inventory: 2 },
+      ],
+    }),
+    [],
+    actor
+  );
+  assert.equal(state.product.inventory, 7);
+});
+
+test("all variants at zero (or all removed) gives total stock 0", async () => {
+  await productService.updateProduct(
+    "p1",
+    baseEdit({
+      variants: [
+        { id: "v1", size: "M", color: "Black", inventory: 0 },
+        { id: "v2", size: "L", color: "Black", inventory: 0 },
+      ],
+    }),
+    [],
+    actor
+  );
+  assert.equal(state.product.inventory, 0);
 });

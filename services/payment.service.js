@@ -3,6 +3,7 @@ const razorpay = require("./razorpay.service");
 const inventoryHistory = require("./inventory-history.service");
 const paymentStatus = require("../utils/payment-status");
 const orderEmail = require("./order-email.service");
+const audit = require("./audit.service");
 
 const ORDER_FIELDS = `
   id,
@@ -224,6 +225,26 @@ const finalizePaidOrder = async (order, paymentId) => {
     );
 
     await connection.commit();
+
+    // Audit trail: who paid is the order's customer (the webhook has no session).
+    // Best effort - never lets a logging problem change the payment result.
+    try {
+      let email = null;
+      try {
+        const [people] = await pool.execute("SELECT email FROM profiles WHERE id = ? LIMIT 1", [current.user_id]);
+        email = people?.[0]?.email || null;
+      } catch (_) {}
+      await audit.record({
+        actor: { id: current.user_id, email, role: "customer", ip: null },
+        action: "order.payment_confirmed",
+        resourceType: "order",
+        resourceId: order.id,
+        before: { status: current.status, paymentStatus: current.payment_status },
+        after: { status: "Confirmed", paymentStatus: "Paid", paymentId },
+        dedupeKey: `order_paid:${order.id}`,
+      });
+    } catch (_) {}
+
     return "paid";
   } catch (error) {
     try {
@@ -370,7 +391,7 @@ const verifyPayment = async ({
 const markFailed = async ({ userId, orderId }) => {
   const pool = await poolPromise;
 
-  await pool.execute(
+  const [updated] = await pool.execute(
     `
       UPDATE orders
       SET
@@ -383,6 +404,20 @@ const markFailed = async ({ userId, orderId }) => {
     `,
     [orderId, userId]
   );
+
+  if (updated && updated.affectedRows > 0) {
+    orderEmail.sendPaymentFailed(orderId);
+    await audit.record({
+      actor: { id: userId, email: null, role: "customer", ip: null },
+      action: "order.payment_failed",
+      resourceType: "order",
+      resourceId: orderId,
+      outcome: "failure",
+      before: { paymentStatus: "Pending" },
+      after: { paymentStatus: "Failed" },
+      dedupeKey: `order_pay_failed:${orderId}`,
+    });
+  }
 
   return { orderId, paymentStatus: "Failed" };
 };

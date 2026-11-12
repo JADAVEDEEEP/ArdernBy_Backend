@@ -3,7 +3,12 @@ const { poolPromise } = require("../config/sql");
 const razorpay = require("./razorpay.service");
 const couponService = require("./coupon.service");
 const audit = require("./audit.service");
-const { decidePurchase, addDays } = require("../utils/membership-policy");
+const {
+  MEMBER_PLAN_SLUG,
+  MEMBER_PLAN_NAME,
+  decidePurchase,
+  addDays,
+} = require("../utils/membership-policy");
 const {
   DEFAULT_MAX_TOTAL_DISCOUNT_PERCENT,
   memberUnitPrice,
@@ -12,10 +17,13 @@ const {
 const { calculateOrderTotals } = require("../utils/pricing");
 
 // ==========================================
-// MEMBERSHIP (Bronze / Silver / Gold)
+// MEMBERSHIP (single plan: KOVENIK MEMBER)
 //
 // Built on the existing subscription tables:
-//   subscription_plans          -> the tiers (tier_rank > 0 marks a membership tier)
+//   subscription_plans          -> the plan (slug "kovenik-member"). The old Bronze / Silver /
+//                                  Gold rows (tier_rank > 0) are retired: hidden from customers
+//                                  but never deleted, and terms already bought on them keep
+//                                  running (see getMemberContext / legacy handling below).
 //   subscription_plan_benefits  -> benefit lines shown to customers
 //   subscriptions               -> one row per purchase attempt / term
 // plus membership_product_prices (per-product rules) from scripts/sql/membership_phase1.sql.
@@ -82,10 +90,29 @@ const updateSettings = async ({ maxTotalDiscountPercent }, req) => {
 
 // ---------- plans ----------
 
+const withFreeShippingBenefit = (row, benefits) => {
+  const shaped = benefits.map((b) => ({
+    id: b.id,
+    type: b.benefit_type,
+    value: b.benefit_value == null ? null : Number(b.benefit_value),
+    description: b.description,
+    active: Boolean(b.active),
+  }));
+  const has = shaped.some((b) => b.type === "FREE_DELIVERY" && b.active);
+  if (row.slug === MEMBER_PLAN_SLUG && MEMBERS_SHIP_FREE && !has) {
+    shaped.push({ id: "free-shipping", type: "FREE_DELIVERY", value: null, description: "Free shipping on every order", active: true });
+  }
+  return shaped;
+};
+
 const PLAN_COLUMNS = `
   p.id, p.name, p.slug, p.description, p.price, p.duration_days, p.tier_rank,
   p.free_delivery, p.discount_percent, p.active, p.created_at, p.updated_at
 `;
+
+// Temporary shipping rule (until Shiprocket): EVERY active member ships free. It is a property
+// of membership itself, so it does not depend on a per-plan flag or benefit row in the database.
+const MEMBERS_SHIP_FREE = true;
 
 const shapePlan = (row, benefits) => ({
   id: row.id,
@@ -95,21 +122,17 @@ const shapePlan = (row, benefits) => ({
   price: Number(row.price),
   durationDays: Number(row.duration_days),
   tierRank: Number(row.tier_rank),
-  freeDelivery: Boolean(row.free_delivery),
+  freeDelivery: Boolean(row.free_delivery) || (row.slug === MEMBER_PLAN_SLUG && MEMBERS_SHIP_FREE),
   discountPercent: Number(row.discount_percent),
   active: Boolean(row.active),
-  benefits: benefits.map((b) => ({
-    id: b.id,
-    type: b.benefit_type,
-    value: b.benefit_value == null ? null : Number(b.benefit_value),
-    description: b.description,
-    active: Boolean(b.active),
-  })),
+  benefits: withFreeShippingBenefit(row, benefits),
 });
 
-const loadPlans = async (executor, { onlyActive, planId } = {}) => {
+// memberOnly: just the one plan customers can buy (hides retired legacy tiers).
+const loadPlans = async (executor, { onlyActive, planId, memberOnly } = {}) => {
   const where = ["p.tier_rank > 0"];
   const params = [];
+  if (memberOnly) where.push(`p.slug = '${MEMBER_PLAN_SLUG}'`);
   if (onlyActive) where.push("p.active = 1");
   if (planId) {
     where.push("p.id = ?");
@@ -135,7 +158,7 @@ const loadPlans = async (executor, { onlyActive, planId } = {}) => {
 const getPublicPlans = async () => {
   const pool = await poolPromise;
   try {
-    return await loadPlans(pool, { onlyActive: true });
+    return await loadPlans(pool, { onlyActive: true, memberOnly: true });
   } catch (error) {
     if (notMigrated(error)) return [];
     throw error;
@@ -174,12 +197,16 @@ const getQueuedTerm = async (executor, userId, now = new Date()) => {
   return rows[0] || null;
 };
 
+// Customers only ever see "KOVENIK MEMBER": a term bought on a retired tier is presented
+// as a member term (the real plan name stays in the database and in the admin views).
+const isLegacySlug = (slug) => slug !== MEMBER_PLAN_SLUG;
+
 const shapeTerm = (row) =>
   row && {
     id: row.id,
     planId: row.plan_id,
-    planName: row.plan_name,
-    planSlug: row.plan_slug,
+    planName: MEMBER_PLAN_NAME,
+    planSlug: MEMBER_PLAN_SLUG,
     tierRank: Number(row.tier_rank),
     status: row.status,
     startDate: row.start_date,
@@ -207,22 +234,44 @@ const getMyMembership = async (userId) => {
     [userId]
   );
 
-  const plans = currentRow ? await loadPlans(pool, { planId: currentRow.plan_id }) : [];
+  // Effective benefits (what pricing really applies) and the member plan's benefit lines.
+  const memberCtx = currentRow ? await getMemberContext(pool, userId) : null;
+  const [memberPlan] = currentRow ? await loadPlans(pool, { memberOnly: true, onlyActive: true }) : [];
   const [profile] = await pool.execute("SELECT birthday FROM profiles WHERE id = ? LIMIT 1", [userId]);
+
+  // A term bought on a retired tier keeps the benefit lines that were shown when it was
+  // bought (e.g. free shipping, priority support), with the discount line showing what is
+  // really applied now. Nothing a paying member was promised silently disappears.
+  let benefits = memberPlan?.benefits.filter((b) => b.active) || [];
+  if (currentRow && isLegacySlug(currentRow.plan_slug)) {
+    const [legacyPlan] = await loadPlans(pool, { planId: currentRow.plan_id });
+    const own = (legacyPlan?.benefits || []).filter((b) => b.active && b.type !== "DISCOUNT");
+    const discount = benefits.find((b) => b.type === "DISCOUNT") || {
+      id: "effective-discount",
+      type: "DISCOUNT",
+      value: memberCtx ? memberCtx.discountPercent : Number(currentRow.discount_percent),
+      description: `${memberCtx ? memberCtx.discountPercent : Number(currentRow.discount_percent)}% off eligible products`,
+      active: true,
+    };
+    const extra = benefits.filter((b) => b.type !== "DISCOUNT" && !own.some((o) => o.type === b.type));
+    benefits = [discount, ...own, ...extra];
+  }
 
   return {
     current: currentRow && {
       ...shapeTerm(currentRow),
-      discountPercent: Number(currentRow.discount_percent),
-      freeDelivery: Boolean(currentRow.free_delivery),
-      benefits: plans[0]?.benefits.filter((b) => b.active) || [],
+      discountPercent: memberCtx ? memberCtx.discountPercent : Number(currentRow.discount_percent),
+      freeDelivery: memberCtx ? memberCtx.freeDelivery : Boolean(currentRow.free_delivery),
+      benefits,
     },
     queued: shapeTerm(queuedRow),
     birthday: profile[0]?.birthday || null,
     history: history.map((h) => ({
       id: h.id,
-      planName: h.plan_name,
-      planSlug: h.plan_slug,
+      planName: MEMBER_PLAN_NAME,
+      planSlug: MEMBER_PLAN_SLUG,
+      // Kept so a customer can still recognise an older purchase.
+      previousPlan: isLegacySlug(h.plan_slug) ? h.plan_name : null,
       status: h.status,
       paymentStatus: h.payment_status,
       amount: h.amount == null ? null : Number(h.amount),
@@ -251,7 +300,7 @@ const startPurchase = async ({ userId, planId }) => {
   if (!razorpay.isConfigured()) throw httpError("Online payments are not configured.", 503);
 
   const pool = await poolPromise;
-  const plans = await loadPlans(pool, { onlyActive: true, planId });
+  const plans = await loadPlans(pool, { onlyActive: true, memberOnly: true, planId });
   const plan = plans[0];
   if (!plan) throw httpError("This membership plan is not available.", 404);
 
@@ -260,12 +309,7 @@ const startPurchase = async ({ userId, planId }) => {
     getCurrentTerm(pool, userId, now),
     getQueuedTerm(pool, userId, now),
   ]);
-  const decision = decidePurchase({
-    current,
-    queued,
-    target: { tier_rank: plan.tierRank },
-    now,
-  });
+  const decision = decidePurchase({ current, queued, now });
   if (decision.action === "blocked") throw httpError(decision.reason, 409);
 
   // Same customer + same plan, started moments ago: hand back the same Razorpay
@@ -345,7 +389,7 @@ const settlePayment = async ({ razorpayOrderId, paymentId, amountPaise, userId }
 
     const [rows] = await connection.execute(
       `SELECT s.id, s.user_id, s.plan_id, s.status, s.amount, s.payment_status, s.razorpay_payment_id,
-              p.duration_days, p.tier_rank, p.active
+              p.duration_days, p.slug AS plan_slug, p.active
        FROM subscriptions s INNER JOIN subscription_plans p ON p.id = s.plan_id
        WHERE s.razorpay_order_id = ? LIMIT 1 FOR UPDATE`,
       [razorpayOrderId]
@@ -378,28 +422,12 @@ const settlePayment = async ({ razorpayOrderId, paymentId, amountPaise, userId }
       getCurrentTerm(connection, row.user_id, now),
       getQueuedTerm(connection, row.user_id, now),
     ]);
-    const decision = decidePurchase({ current, queued, target: { tier_rank: row.tier_rank }, now });
+    const decision = decidePurchase({ current, queued, now });
 
     if (decision.action === "blocked") {
       await connection.rollback();
       await refundBack(pool, row, paymentId);
       return { outcome: "refunded", reason: decision.reason, subscriptionId: row.id };
-    }
-
-    if (decision.action === "upgrade") {
-      // The lower term(s) end now; no pro-rata credit by policy.
-      await connection.execute(
-        `UPDATE subscriptions s INNER JOIN subscription_plans p ON p.id = s.plan_id
-         SET s.status = 'expired', s.end_date = ?, s.updated_at = ?
-         WHERE s.user_id = ? AND s.status = 'active' AND p.tier_rank > 0 AND s.start_date <= ? AND s.end_date > ?`,
-        [now, now, row.user_id, now, now]
-      );
-      await connection.execute(
-        `UPDATE subscriptions s INNER JOIN subscription_plans p ON p.id = s.plan_id
-         SET s.status = 'cancelled', s.updated_at = ?
-         WHERE s.user_id = ? AND s.status = 'active' AND p.tier_rank > 0 AND s.start_date > ?`,
-        [now, row.user_id, now]
-      );
     }
 
     const startDate = decision.startDate;
@@ -414,6 +442,14 @@ const settlePayment = async ({ razorpayOrderId, paymentId, amountPaise, userId }
     );
 
     await connection.commit();
+
+    // One e-mail per purchase (dedupe key), whichever path settled it (verify, sync, webhook).
+    emails.notifyMembership(row.user_id, {
+      dedupeKey: `membership-${decision.action === "renew" ? "renewed" : "activated"}:${row.id}`,
+      template: decision.action === "renew" ? "membership_renewed" : "membership_activated",
+      data: { amount: Number(row.amount), startDate, endDate },
+    });
+
     return { outcome: "activated", subscriptionId: row.id, action: decision.action, startDate, endDate };
   } catch (error) {
     try {
@@ -447,11 +483,18 @@ const verifyPurchase = async ({ userId, razorpayOrderId, razorpayPaymentId, sign
 
 const markFailed = async ({ userId, razorpayOrderId }) => {
   const pool = await poolPromise;
-  await pool.execute(
+  const [failedResult] = await pool.execute(
     `UPDATE subscriptions SET payment_status = 'failed', updated_at = ?
      WHERE razorpay_order_id = ? AND user_id = ? AND status = 'pending' AND payment_status = 'created'`,
     [new Date(), razorpayOrderId, userId]
   );
+  if (failedResult && failedResult.affectedRows > 0) {
+    emails.notifyMembership(userId, {
+      dedupeKey: `membership-payment-failed:${razorpayOrderId}`,
+      template: "membership_payment_failed",
+      data: { amount: null },
+    });
+  }
   return { razorpayOrderId, paymentStatus: "failed" };
 };
 
@@ -493,6 +536,8 @@ const settleWebhookPayment = async ({ razorpayOrderId, paymentId, amountPaise })
 
 // Housekeeping (run on a timer): ends terms past their end date and closes purchases
 // that were never paid. Reads already treat past-end terms as expired either way.
+const emails = require("./membership-email.service");
+
 const sweep = async () => {
   const pool = await poolPromise;
   const now = new Date();
@@ -505,6 +550,7 @@ const sweep = async () => {
      WHERE status = 'pending' AND razorpay_order_id IS NOT NULL AND created_at < ?`,
     [now, new Date(now.getTime() - PENDING_ABANDON_MS)]
   );
+  await emails.membershipLifecycle(pool, now);
   return { expired: expired.affectedRows, abandoned: abandoned.affectedRows };
 };
 
@@ -516,13 +562,34 @@ const getMemberContext = async (executor, userId) => {
   try {
     const term = await getCurrentTerm(executor, userId);
     if (!term) return null;
+
+    let planId = term.plan_id;
+    let discountPercent = Number(term.discount_percent);
+    // Any active term ships free (temporary rule). An old Gold term's own flag is covered too.
+    let freeDelivery = MEMBERS_SHIP_FREE || Boolean(term.free_delivery);
+
+    if (isLegacySlug(term.plan_slug)) {
+      // A term bought before the single plan existed. It is honoured as KOVENIK MEMBER:
+      // never worse than what was bought (an older tier's free shipping stays), never
+      // worse than today's plan. Rules and prices come from the member plan only.
+      const [rows] = await executor.execute(
+        `SELECT p.id, p.discount_percent, p.free_delivery FROM subscription_plans p
+         WHERE p.tier_rank > 0 AND p.slug = '${MEMBER_PLAN_SLUG}' AND p.active = 1 LIMIT 1`
+      );
+      if (rows[0]) {
+        planId = rows[0].id;
+        discountPercent = Math.max(discountPercent, Number(rows[0].discount_percent));
+        freeDelivery = freeDelivery || Boolean(rows[0].free_delivery);
+      }
+    }
+
     return {
-      planId: term.plan_id,
-      planName: term.plan_name,
-      planSlug: term.plan_slug,
+      planId,
+      planName: MEMBER_PLAN_NAME,
+      planSlug: MEMBER_PLAN_SLUG,
       tierRank: Number(term.tier_rank),
-      discountPercent: Number(term.discount_percent),
-      freeDelivery: Boolean(term.free_delivery),
+      discountPercent,
+      freeDelivery,
     };
   } catch (error) {
     if (notMigrated(error)) return null;
@@ -637,8 +704,7 @@ const getMyPricing = async (userId, productIds) => {
   };
 };
 
-// For guests, non-members and expired members: what the entry tier (lowest active
-// tier) would charge, so the storefront can say "Join and save Rs X". Same maths as
+// For guests, non-members and expired members: what KOVENIK MEMBER would charge, so the storefront can say "Join and save Rs X". Same maths as
 // priceLines (product rules, sale-price stacking, discount cap). Display only.
 const PREVIEW_TTL_MS = 60 * 1000;
 let previewCache = { at: 0, key: "", value: null };
@@ -653,7 +719,7 @@ const getPreviewPricing = async (productIds) => {
   const pool = await poolPromise;
   let plans;
   try {
-    plans = await loadPlans(pool, { onlyActive: true });
+    plans = await loadPlans(pool, { onlyActive: true, memberOnly: true });
   } catch (error) {
     if (notMigrated(error)) return { plan: null, prices: {} };
     throw error;
@@ -773,9 +839,13 @@ const writeBenefits = async (connection, planId, benefits) => {
   }
 };
 
+// The member plan first; retired legacy tiers follow (read-only, flagged `retired`).
 const adminListPlans = async () => {
   const pool = await poolPromise;
-  return loadPlans(pool, {});
+  const plans = await loadPlans(pool, {});
+  return plans
+    .map((plan) => ({ ...plan, retired: isLegacySlug(plan.slug) }))
+    .sort((a, b) => Number(a.retired) - Number(b.retired) || a.tierRank - b.tierRank);
 };
 
 const adminSavePlan = async ({ planId, input, req }) => {
@@ -791,7 +861,12 @@ const adminSavePlan = async ({ planId, input, req }) => {
       const existing = await loadPlans(connection, { planId });
       before = existing[0];
       if (!before) throw httpError("Plan not found.", 404);
-      const fields = validatePlanInput(input, { partial: true });
+      if (isLegacySlug(before.slug)) {
+        throw httpError("This is a retired plan kept for existing members. Edit KOVENIK MEMBER instead.", 409);
+      }
+      // The slug identifies the plan in code; it is not editable. Tier order has no meaning with one plan.
+      const { slug: _slug, tierRank: _tierRank, ...editable } = input;
+      const fields = validatePlanInput(editable, { partial: true });
       const keys = Object.keys(fields);
       if (keys.length) {
         await connection.execute(
@@ -800,13 +875,8 @@ const adminSavePlan = async ({ planId, input, req }) => {
         );
       }
     } else {
-      const fields = validatePlanInput(input);
-      id = crypto.randomUUID();
-      const keys = ["id", ...Object.keys(fields)];
-      await connection.execute(
-        `INSERT INTO subscription_plans (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`,
-        [id, ...Object.keys(fields).map((k) => fields[k])]
-      );
+      // Single-plan membership: the plan is created once by scripts/seed-membership-plans.js.
+      throw httpError("KOVENIK has a single membership plan. Edit KOVENIK MEMBER instead of creating another.", 409);
     }
 
     if (benefits) await writeBenefits(connection, id, benefits);
@@ -921,18 +991,15 @@ const adminChangeStatus = async ({ subscriptionId, userId, planId, action, reaso
 
   if (action === "grant") {
     const [plans] = await pool.execute(
-      "SELECT id, duration_days, tier_rank FROM subscription_plans WHERE id = ? AND tier_rank > 0 LIMIT 1",
+      `SELECT id, duration_days, tier_rank FROM subscription_plans WHERE id = ? AND tier_rank > 0 AND slug = '${MEMBER_PLAN_SLUG}' LIMIT 1`,
       [planId]
     );
     if (!plans[0]) throw httpError("Plan not found.", 404);
     const [users] = await pool.execute("SELECT id FROM profiles WHERE id = ? AND role = 'customer' LIMIT 1", [userId]);
     if (!users[0]) throw httpError("Customer not found.", 404);
     const current = await getCurrentTerm(pool, userId, now);
-    if (current && Number(current.tier_rank) >= Number(plans[0].tier_rank)) {
-      throw httpError("This customer already has an equal or higher membership.", 409);
-    }
     if (current) {
-      await pool.execute("UPDATE subscriptions SET status = 'expired', end_date = ?, updated_at = ? WHERE id = ?", [now, now, current.id]);
+      throw httpError("This customer is already a member.", 409);
     }
     const id = crypto.randomUUID();
     await pool.execute(
@@ -991,7 +1058,10 @@ const adminListProductRules = async (planId) => {
 
 const adminSetProductRule = async ({ planId, productId, eligible, memberPrice, req }) => {
   const pool = await poolPromise;
-  const [plan] = await pool.execute("SELECT id FROM subscription_plans WHERE id = ? AND tier_rank > 0 LIMIT 1", [planId]);
+  const [plan] = await pool.execute(
+    `SELECT id FROM subscription_plans WHERE id = ? AND tier_rank > 0 AND slug = '${MEMBER_PLAN_SLUG}' LIMIT 1`,
+    [planId]
+  );
   if (!plan[0]) throw httpError("Plan not found.", 404);
   const [product] = await pool.execute("SELECT id, price FROM products WHERE id = ? LIMIT 1", [productId]);
   if (!product[0]) throw httpError("Product not found.", 404);

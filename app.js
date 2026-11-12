@@ -37,7 +37,7 @@ app.use(
     limit: "100kb",
     // The Razorpay webhook signature is computed over the exact raw bytes.
     verify: (req, _res, buf) => {
-      if (req.originalUrl.startsWith("/api/payments/razorpay/webhook")) req.rawBody = buf;
+      if (req.originalUrl.startsWith("/api/payments/razorpay/webhook") || req.originalUrl.startsWith("/api/payments/razorpayx/webhook")) req.rawBody = buf;
     },
   })
 );
@@ -66,6 +66,7 @@ app.use("/api/membership", require("./routes/membership.routes"));
 app.use("/api/addresses", addressRoutes);
 app.use("/api/orders", orderRoutes);
 app.post("/api/payments/razorpay/webhook", require("./controller/payment.controller").razorpayWebhook);
+app.post("/api/payments/razorpayx/webhook", require("./controller/payment.controller").razorpayxWebhook);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/superadmin", superAdminRouter);
 app.use("/api/admin", adminRouter);

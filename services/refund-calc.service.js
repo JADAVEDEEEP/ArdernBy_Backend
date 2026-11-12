@@ -85,6 +85,10 @@ const computeRefund = ({
   lines,
   picks,
   includeShipping = false,
+  // Seller-fault return: also refund this return's share of the original shipping charge
+  // and of the COD handling fee (with its GST). The share follows the goods being
+  // returned (floor, so the shares of several returns never add up to more than was paid).
+  sellerFault = false,
   deductionPaise = 0,
   alreadyRefundedPaise = 0,
 }) => {
@@ -120,8 +124,17 @@ const computeRefund = ({
   }
 
   const goodsPaise = broken.reduce((sum, row) => sum + row.refundPaise, 0);
-  const shippingPaise = includeShipping ? toPaise(order.shipping_amount) : 0;
-  const calculatedPaise = goodsPaise + shippingPaise;
+  let shippingPaise = includeShipping ? toPaise(order.shipping_amount) : 0;
+  let codFeePaise = 0;
+  if (sellerFault && !includeShipping) {
+    const orderGross = allocated.reduce((sum, line) => sum + line.grossPaise, 0);
+    const thisGross = broken.reduce((sum, row) => sum + row.grossPaise, 0);
+    if (orderGross > 0) {
+      shippingPaise = Math.floor((toPaise(order.shipping_amount) * thisGross) / orderGross);
+      codFeePaise = Math.floor(((toPaise(order.cod_fee) + toPaise(order.cod_fee_tax)) * thisGross) / orderGross);
+    }
+  }
+  const calculatedPaise = goodsPaise + shippingPaise + codFeePaise;
 
   const deduction = Math.round(Number(deductionPaise) || 0);
   if (deduction < 0 || deduction > calculatedPaise) {
@@ -152,17 +165,20 @@ const computeRefund = ({
     })),
     goods: rupees(goodsPaise),
     shipping: rupees(shippingPaise),
+    codFee: rupees(codFeePaise),
     calculated: rupees(calculatedPaise),
     deduction: rupees(deduction),
     final: rupees(finalPaise),
     goodsPaise,
     shippingPaise,
+    codFeePaise,
     calculatedPaise,
     deductionPaise: deduction,
     finalPaise,
     paid: rupees(paidPaise),
     remainingAfter: rupees(remainingBefore - finalPaise),
-    includesShipping: Boolean(includeShipping),
+    includesShipping: Boolean(includeShipping) || (sellerFault && shippingPaise > 0),
+    sellerFault: Boolean(sellerFault),
   };
 };
 

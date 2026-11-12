@@ -29,7 +29,7 @@ const isConfigured = () => {
   }
 };
 
-const request = async (method, path, body) => {
+const request = async (method, path, body, extraHeaders) => {
   const { keyId, keySecret } = getCredentials();
 
   const response = await fetch(`${API_BASE}${path}`, {
@@ -37,6 +37,7 @@ const request = async (method, path, body) => {
     headers: {
       Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}`,
       "Content-Type": "application/json",
+      ...(extraHeaders || {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -163,6 +164,7 @@ const verifyWebhookSignature = (rawBody, signature) => {
 };
 
 module.exports = {
+  request,
   isWebhookConfigured,
   verifyWebhookSignature,
   getCredentials,

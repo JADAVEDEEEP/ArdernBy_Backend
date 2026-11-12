@@ -27,7 +27,7 @@ CREATE TABLE product_reviews (
 CREATE TABLE orders (
   id CHAR(36) PRIMARY KEY, user_id CHAR(36), order_number VARCHAR(40), status VARCHAR(30), payment_method VARCHAR(10),
   payment_status VARCHAR(30), payment_id VARCHAR(100), payment_order_id VARCHAR(100), subtotal DECIMAL(10,2), shipping_amount DECIMAL(10,2),
-  discount_amount DECIMAL(10,2), tax_amount DECIMAL(10,2), total_amount DECIMAL(10,2), coupon_code VARCHAR(50),
+  discount_amount DECIMAL(10,2), tax_amount DECIMAL(10,2), cod_fee DECIMAL(10,2) NOT NULL DEFAULT 0, cod_fee_tax DECIMAL(10,2) NOT NULL DEFAULT 0, total_amount DECIMAL(10,2), coupon_code VARCHAR(50),
   shipping_name VARCHAR(150), shipping_phone VARCHAR(30), shipping_pincode VARCHAR(12), shipping_address VARCHAR(300),
   shipping_city VARCHAR(100), shipping_state VARCHAR(100), shiprocket_order_id VARCHAR(64) NULL, shiprocket_shipment_id VARCHAR(64) NULL,
   created_at DATETIME(6), updated_at DATETIME(6)

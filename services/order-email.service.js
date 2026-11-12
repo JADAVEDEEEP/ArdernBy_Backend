@@ -36,7 +36,7 @@ const sendOrderConfirmation = async (orderId) => {
       `
         SELECT
           id, user_id, order_number, status, payment_method, payment_status,
-          subtotal, shipping_amount, discount_amount, tax_amount, total_amount,
+          subtotal, shipping_amount, discount_amount, tax_amount, cod_fee, cod_fee_tax, total_amount,
           coupon_code, created_at,
           shipping_name, shipping_phone, shipping_address, shipping_city,
           shipping_state, shipping_pincode
@@ -65,6 +65,7 @@ const sendOrderConfirmation = async (orderId) => {
       dedupeKey: `order-confirmation:${order.id}`,
       template: "order_confirmation",
       data: {
+        orderId: order.id,
         orderNumber: order.order_number,
         placedAt: order.created_at,
         paymentMethod: lc(order.payment_method),
@@ -79,6 +80,7 @@ const sendOrderConfirmation = async (orderId) => {
         shipping: Number(order.shipping_amount),
         discount: Number(order.discount_amount),
         tax: Number(order.tax_amount),
+        codFee: Number(order.cod_fee || 0) + Number(order.cod_fee_tax || 0),
         total: Number(order.total_amount),
         couponCode: order.coupon_code,
         shipName: order.shipping_name,
@@ -95,4 +97,57 @@ const sendOrderConfirmation = async (orderId) => {
   }
 };
 
-module.exports = { sendOrderConfirmation, isConfirmable };
+// "Shipped" / "Delivered" milestone e-mails. Fire-and-forget: never awaited by callers and
+// never throws. One e-mail per order and milestone (dedupe key claimed before sending).
+const sendOrderStatusEmail = (orderId, status) => {
+  const template = { Shipped: "order_shipped", Delivered: "order_delivered" }[status];
+  if (!template || !orderId) return Promise.resolve({ sent: false, skipped: "no_template" });
+
+  return (async () => {
+    try {
+      const pool = await poolPromise;
+      const [orders] = await pool.execute(
+        "SELECT id, user_id, order_number, status FROM orders WHERE id = ? LIMIT 1",
+        [orderId]
+      );
+      const order = orders[0];
+      if (!order || order.status !== status) return { sent: false, skipped: "status_changed" };
+
+      return await notifications.notifyUser({
+        userId: order.user_id,
+        dedupeKey: `${template.replace("_", "-")}:${order.id}`,
+        template,
+        data: { orderId: order.id, orderNumber: order.order_number },
+      });
+    } catch (error) {
+      console.error("Order status e-mail failed:", error.code || error.message);
+      return { sent: false, failed: true };
+    }
+  })();
+};
+
+// "Payment did not go through" for an online order. Sent once per order.
+const sendPaymentFailed = (orderId) =>
+  (async () => {
+    try {
+      const pool = await poolPromise;
+      const [orders] = await pool.execute(
+        "SELECT id, user_id, order_number, total_amount, payment_status FROM orders WHERE id = ? LIMIT 1",
+        [orderId]
+      );
+      const order = orders[0];
+      if (!order || String(order.payment_status).toLowerCase() !== "failed") return { sent: false, skipped: "not_failed" };
+
+      return await notifications.notifyUser({
+        userId: order.user_id,
+        dedupeKey: `payment-failed:${order.id}`,
+        template: "payment_failed",
+        data: { orderId: order.id, orderNumber: order.order_number, amount: Number(order.total_amount) },
+      });
+    } catch (error) {
+      console.error("Payment failed e-mail error:", error.code || error.message);
+      return { sent: false, failed: true };
+    }
+  })();
+
+module.exports = { sendOrderConfirmation, sendOrderStatusEmail, sendPaymentFailed, isConfirmable };

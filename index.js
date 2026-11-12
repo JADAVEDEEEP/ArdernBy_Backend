@@ -57,4 +57,16 @@ app.listen(PORT, () => {
       .catch((error) => console.error("Refund auto-sync failed:", error.message));
   setTimeout(syncRefunds, 60 * 1000).unref();
   setInterval(syncRefunds, 5 * 60 * 1000).unref();
+
+  // COD UPI payouts RazorpayX has not finished: read back until processed / failed, so a missed
+  // webhook never leaves a customer on "Processing". Does nothing while RazorpayX is off.
+  const codPayoutSync = () =>
+    require("./services/cod-payout.service")
+      .autoSyncOnce()
+      .then((summary) => {
+        if (summary.examined > 0) console.log("COD payout auto-sync:", JSON.stringify(summary));
+      })
+      .catch((error) => console.error("COD payout auto-sync failed:", error.message));
+  setTimeout(codPayoutSync, 90 * 1000).unref();
+  setInterval(codPayoutSync, 5 * 60 * 1000).unref();
 });

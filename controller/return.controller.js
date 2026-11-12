@@ -22,13 +22,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const requestReturn = async (req, res) => {
   try {
-    const { orderId, reasonCode, description, items } = req.body || {};
+    const { orderId, reasonCode, description, items, upiId } = req.body || {};
     const data = await returnService.createRequest({
       userId: req.user.id,
       orderId: str(orderId),
       reasonCode: str(reasonCode),
       description,
       items,
+      upiId: str(upiId),
       actor: audit.actorFrom(req),
     });
     return res.status(201).json({ success: true, return: data });
@@ -39,8 +40,8 @@ const requestReturn = async (req, res) => {
 
 const previewReturn = async (req, res) => {
   try {
-    const { orderId, items } = req.body || {};
-    const data = await returnService.preview({ userId: req.user.id, orderId: str(orderId), items });
+    const { orderId, items, reasonCode } = req.body || {};
+    const data = await returnService.preview({ userId: req.user.id, orderId: str(orderId), items, reasonCode: str(reasonCode) });
     return res.status(200).json({ success: true, ...data });
   } catch (error) {
     return fail(res, error, "Preview return error");
