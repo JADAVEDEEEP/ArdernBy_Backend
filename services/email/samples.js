@@ -27,6 +27,7 @@ const base = { name: "Asha", orderId: order.orderId, orderNumber: order.orderNum
 
 const SAMPLES = {
   account_otp: { name: "Asha", code: "482913", purpose: "email_verification" },
+  newsletter_confirm: { confirmUrl: require("./layout").link.newsletterConfirm("A".repeat(43)), hours: 48 },
   welcome: { name: "Asha" },
   password_changed: { name: "Asha", changedAt: "2026-11-09T10:00:00Z" },
   support_received: { name: "Asha", subject: "Where is my order?", orderNumber: order.orderNumber },

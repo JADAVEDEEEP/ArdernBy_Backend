@@ -39,6 +39,7 @@ const link = {
   faqs: () => `${siteUrl()}/faqs`,
   shipping: () => `${siteUrl()}/shipping`,
   returns: () => `${siteUrl()}/returns`,
+  newsletterConfirm: (token) => `${siteUrl()}/newsletter/confirm?token=${encodeURIComponent(token)}`,
   privacy: () => `${siteUrl()}/privacy`,
   terms: () => `${siteUrl()}/terms`,
 };

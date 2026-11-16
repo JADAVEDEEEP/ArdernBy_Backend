@@ -10,7 +10,7 @@ const names = Object.keys(TEMPLATES);
 // Real storefront routes (ArdenBy/app). An e-mail may only link to these.
 const REAL_ROUTES = [
   /^\/$/, /^\/orders(\/[^/]+)?$/, /^\/membership$/, /^\/profile$/, /^\/shop$/, /^\/cart$/,
-  /^\/contact$/, /^\/faqs$/, /^\/shipping$/, /^\/returns$/, /^\/privacy$/, /^\/terms$/,
+  /^\/contact$/, /^\/newsletter\/confirm$/, /^\/faqs$/, /^\/shipping$/, /^\/returns$/, /^\/privacy$/, /^\/terms$/,
 ];
 
 test("every template has a sample, an HTML body and a text body", () => {

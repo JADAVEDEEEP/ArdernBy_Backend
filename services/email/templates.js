@@ -40,6 +40,20 @@ const TEMPLATES = {
     });
   },
 
+  // Double opt-in confirmation. NOT a marketing e-mail and NOT a welcome e-mail: it only asks the
+  // owner of the mailbox to confirm the sign-up. No offer, no coupon.
+  newsletter_confirm: (d) =>
+    build("Confirm your KOVENIK newsletter subscription", {
+      preheader: "One tap to confirm your email and join the inner circle.",
+      heading: "Confirm your email",
+      intro: "Thanks for signing up to the KOVENIK newsletter. Please confirm your email address to start receiving updates on new arrivals and limited drops.",
+      cta: { label: "Confirm my email", url: d.confirmUrl || link.home() },
+      blocks: [
+        blocks.note(`This link works once and expires in ${d.hours || 48} hours. Your subscription is only active after you confirm.`),
+      ],
+      outro: "If you did not sign up, ignore this email and you will not be subscribed. Nothing else will be sent.",
+    }),
+
   welcome: (d) =>
     build(`Welcome to KOVENIK${d.name ? ", " + d.name : ""}`, {
       preheader: "Your KOVENIK account is ready.",
