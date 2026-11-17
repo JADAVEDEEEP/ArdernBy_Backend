@@ -51,7 +51,21 @@ app.use(
     message: "Too many attempts. Please wait a few minutes and try again.",
   })
 );
-app.use("/api", rateLimit({ windowMs: 60 * 1000, max: 300 }));
+app.use(
+  "/api",
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 300,
+    // RFC 8058 one-click unsubscribes come from a few shared mail-provider proxy IPs, so a flat
+    // per-IP ceiling would block real people during a campaign. That one path has its own limits
+    // in routes/newsletter.routes.js (per token + a generous per-IP flood ceiling).
+    keyFn: (req) =>
+      req.method === "POST" &&
+      ["/api/newsletter/unsubscribe/one-click", "/api/newsletter/provider-webhook"].includes(req.originalUrl.split("?")[0])
+        ? null
+        : req.ip || req.socket?.remoteAddress || "unknown",
+  })
+);
 
 // Routes
 app.use("/api/products", productRouter);

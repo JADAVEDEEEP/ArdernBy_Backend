@@ -186,9 +186,135 @@ const confirm = async (token, deps = {}) => {
   }
 };
 
+// ---------------------------------------------------------------------------------
+// UNSUBSCRIBE
+//
+// Every marketing e-mail carries its OWN unsubscribe token (buildUnsubscribe). A token is
+// single-use: spending it flips the subscriber to `unsubscribed` and marks the token used, in one
+// atomic statement. A second click, or a different old e-mail's link, still ends in "you are
+// unsubscribed" (never an error that might make someone think it failed), but a link can never
+// switch anything back ON: only confirm() can re-activate an address.
+// ---------------------------------------------------------------------------------
+
+const unsubscribe = async (token, deps = {}) => {
+  if (typeof token !== "string" || !TOKEN_SHAPE.test(token)) {
+    throw httpError(400, "This unsubscribe link is not valid.", "TOKEN_INVALID");
+  }
+  const tokenHash = sha256(token);
+
+  try {
+    const pool = deps.pool || (await poolPromise);
+
+    const [result] = await pool.execute(
+      `UPDATE newsletter_tokens t
+         JOIN newsletter_subscribers s ON s.id = t.subscriber_id
+          SET t.used_at = UTC_TIMESTAMP(6),
+              s.status = 'unsubscribed',
+              s.unsubscribed_at = UTC_TIMESTAMP(6),
+              s.updated_at = UTC_TIMESTAMP(6)
+        WHERE t.token_hash = ? AND t.purpose = 'unsubscribe'
+          AND t.used_at IS NULL
+          AND s.status IN ('active', 'pending')`,
+      [tokenHash]
+    );
+    if (result.affectedRows > 0) return { message: "You have been unsubscribed. You will not receive any more emails from us." };
+
+    const [rows] = await pool.execute(
+      `SELECT s.status
+         FROM newsletter_tokens t JOIN newsletter_subscribers s ON s.id = t.subscriber_id
+        WHERE t.token_hash = ? AND t.purpose = 'unsubscribe' LIMIT 1`,
+      [tokenHash]
+    );
+    if (rows[0] && rows[0].status === "unsubscribed") {
+      return { message: "You are already unsubscribed. You will not receive any more emails from us.", alreadyUnsubscribed: true };
+    }
+    throw httpError(400, "This unsubscribe link is not valid.", "TOKEN_INVALID");
+  } catch (error) {
+    if (isMissingTable(error)) throw notAvailable();
+    throw error;
+  }
+};
+
+// Issues a fresh unsubscribe token for ONE recipient of ONE e-mail and returns everything the
+// sender needs: the visible footer link and the RFC 8058 one-click headers. (Used by campaign
+// sending in a later phase; nothing sends marketing e-mail yet.)
+const buildUnsubscribe = async (subscriberId, deps = {}) => {
+  const pool = deps.pool || (await poolPromise);
+  const layout = require("./email/layout");
+  const token = newToken();
+  await pool.execute(
+    `INSERT INTO newsletter_tokens (subscriber_id, purpose, token_hash, expires_at, created_at)
+     VALUES (?, 'unsubscribe', ?, NULL, UTC_TIMESTAMP(6))`,
+    [subscriberId, sha256(token)]
+  );
+  const oneClickUrl = layout.link.newsletterOneClick(token);
+  return {
+    token,
+    url: layout.link.newsletterUnsubscribe(token),
+    oneClickUrl,
+    headers: {
+      "List-Unsubscribe": `<${oneClickUrl}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    },
+  };
+};
+
+// THE single gate for marketing recipients: only confirmed (`active`) subscribers, never pending,
+// unsubscribed, bounced or complained. Campaign sending must read recipients ONLY through this,
+// so an unsubscribed address cannot be mailed. Keyset-paged by id.
+//
+// Optional audience narrowing (it can only ever REMOVE people, never add): `ids` (a chosen list) and
+// `source` (where they signed up). The status check always stays in the WHERE clause.
+const audienceClause = ({ ids, source } = {}) => {
+  let sql = "";
+  const params = [];
+  if (Array.isArray(ids)) {
+    const strict = (x) => (typeof x === "number" ? x : typeof x === "string" && /^d{1,18}$/.test(x) ? Number(x) : NaN);
+    const list = [...new Set(ids.map(strict).filter((x) => Number.isSafeInteger(x) && x > 0))].slice(0, 5000);
+    if (list.length === 0) return { sql: " AND 1 = 0", params: [] };
+    sql += ` AND id IN (${list.map(() => "?").join(",")})`;
+    params.push(...list);
+  }
+  if (typeof source === "string" && source) {
+    sql += " AND source = ?";
+    params.push(source);
+  }
+  return { sql, params };
+};
+
+const listSendable = async ({ afterId = 0, limit = 500, ids, source } = {}, deps = {}) => {
+  const pool = deps.pool || (await poolPromise);
+  const size = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 1000);
+  const after = Math.max(parseInt(afterId, 10) || 0, 0);
+  const extra = audienceClause({ ids, source });
+  const [rows] = await pool.execute(
+    `SELECT id, email FROM newsletter_subscribers
+      WHERE status = 'active' AND id > ?${extra.sql}
+      ORDER BY id ASC LIMIT ${size}`,
+    [after, ...extra.params]
+  );
+  return rows;
+};
+
+// How many people listSendable would return for an audience (same status gate).
+const countSendable = async ({ ids, source } = {}, deps = {}) => {
+  const pool = deps.pool || (await poolPromise);
+  const extra = audienceClause({ ids, source });
+  const [[row]] = await pool.execute(
+    `SELECT COUNT(*) AS c FROM newsletter_subscribers WHERE status = 'active'${extra.sql}`,
+    extra.params
+  );
+  return Number(row.c);
+};
+
 module.exports = {
   subscribe,
   confirm,
+  unsubscribe,
+  buildUnsubscribe,
+  listSendable,
+  countSendable,
+  TOKEN_SHAPE,
   normalizeEmail,
   hashIp,
   sha256,

@@ -69,4 +69,8 @@ app.listen(PORT, () => {
       .catch((error) => console.error("COD payout auto-sync failed:", error.message));
   setTimeout(codPayoutSync, 90 * 1000).unref();
   setInterval(codPayoutSync, 5 * 60 * 1000).unref();
+
+  // Newsletter campaigns: polls MySQL for scheduled / in-progress campaigns. The schedule and the send queue live in
+  // the database, so a restart loses nothing; this timer only notices. (It stays quiet until the tables exist.)
+  require("./services/newsletter-sender.service").startWorker();
 });

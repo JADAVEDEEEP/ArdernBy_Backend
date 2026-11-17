@@ -26,6 +26,10 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => HTML_ESCAP
 const siteUrl = () =>
   String(process.env.SITE_URL || process.env.FRONTEND_URL || "https://ardenby.vercel.app").trim().replace(/\/+$/, "");
 
+// Public address of THIS API (API_PUBLIC_URL; the live Render service when unset).
+const apiPublicUrl = () =>
+  String(process.env.API_PUBLIC_URL || "https://ardernby-backend.onrender.com").trim().replace(/\/+$/, "");
+
 // Real storefront routes (ArdenBy/app). Nothing else is linked from e-mails.
 const link = {
   home: () => siteUrl() + "/",
@@ -39,6 +43,9 @@ const link = {
   faqs: () => `${siteUrl()}/faqs`,
   shipping: () => `${siteUrl()}/shipping`,
   returns: () => `${siteUrl()}/returns`,
+  newsletterUnsubscribe: (token) => `${siteUrl()}/newsletter/unsubscribe?token=${encodeURIComponent(token)}`,
+  // RFC 8058 one-click target: the BACKEND address (mail providers POST to it directly).
+  newsletterOneClick: (token) => `${apiPublicUrl()}/api/newsletter/unsubscribe/one-click?token=${encodeURIComponent(token)}`,
   newsletterConfirm: (token) => `${siteUrl()}/newsletter/confirm?token=${encodeURIComponent(token)}`,
   privacy: () => `${siteUrl()}/privacy`,
   terms: () => `${siteUrl()}/terms`,

@@ -313,4 +313,4 @@ const streamSalesSummary = async ({ res, query, actor }) => {
   }
 };
 
-module.exports = { streamOrders, streamSalesSummary, csvCell, csvLine };
+module.exports = { streamOrders, streamSalesSummary, csvCell, csvLine, startCsv, write };
