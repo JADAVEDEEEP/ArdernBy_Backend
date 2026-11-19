@@ -84,6 +84,26 @@ const TEMPLATES = {
       cta: { label: "Browse FAQs", url: link.faqs() },
     }),
 
+  // Sent to the support inbox (not the customer) when the contact form is submitted.
+  support_inbound: (d) => {
+    const who = String(d.name || "").trim() || "A customer";
+    const subject = String(d.subject || "").trim() || "New message";
+    const reply = d.email
+      ? { label: "Reply to " + (who.split(" ")[0] || "customer"), url: `mailto:${d.email}?subject=${encodeURIComponent("Re: " + subject)}` }
+      : null;
+    return build(`[KOVENIK support] ${subject}`, {
+      preheader: `${who}: ${String(d.message || "").replace(/\s+/g, " ").slice(0, 90)}`,
+      heading: subject,
+      internal: true,
+      intro: "New message from the contact form. Hit reply and it goes straight to the customer.",
+      blocks: [
+        blocks.details([["Name", d.name], ["Email", d.email], ["Order", d.orderNumber || "Not given"], ["Received", formatDate(d.receivedAt || new Date(), true)]]),
+        blocks.message(d.message),
+      ],
+      cta: reply,
+    });
+  },
+
   // ---------------- orders ----------------
   order_confirmation: (d) => {
     const online = d.paymentMethod === "online";

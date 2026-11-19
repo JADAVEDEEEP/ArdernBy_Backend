@@ -31,6 +31,7 @@ const SAMPLES = {
   welcome: { name: "Asha" },
   password_changed: { name: "Asha", changedAt: "2026-11-09T10:00:00Z" },
   support_received: { name: "Asha", subject: "Where is my order?", orderNumber: order.orderNumber },
+  support_inbound: { name: "Asha Rao", email: "asha@example.com", subject: "Where is my order?", orderNumber: order.orderNumber, message: "Hi, my order was supposed to arrive yesterday.\nCould you check the status?" },
   order_confirmation: { name: "Asha", ...order },
   order_shipped: { ...base, carrier: "Delhivery", trackingNumber: "DL123456789" },
   order_delivered: base,

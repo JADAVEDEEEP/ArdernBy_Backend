@@ -71,6 +71,8 @@ const createAddress = async (req, res) => {
       state,
       addressType,
       isDefault,
+      latitude,
+      longitude,
     } = req.body;
 
     if (
@@ -98,6 +100,8 @@ const createAddress = async (req, res) => {
         state,
         addressType,
         isDefault,
+        latitude,
+        longitude,
       }
     );
 
@@ -134,6 +138,8 @@ const updateAddress = async (req, res) => {
       state,
       addressType,
       isDefault,
+      latitude,
+      longitude,
     } = req.body;
 
     const updatedAddress =
@@ -149,6 +155,8 @@ const updateAddress = async (req, res) => {
           state,
           addressType,
           isDefault,
+          latitude,
+          longitude,
         }
       );
 

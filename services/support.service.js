@@ -81,13 +81,8 @@ const submit = async (input, deps = {}) => {
   }
 
   const { from, envelopeFrom } = sender();
-  const lines = [
-    `Name: ${fields.name}`,
-    `Email: ${fields.email}`,
-    `Order number: ${fields.orderNumber || "not given"}`,
-    "",
-    fields.message,
-  ];
+  const { TEMPLATES } = require("./email/templates");
+  const inbound = TEMPLATES.support_inbound({ ...fields, receivedAt: new Date() });
 
   try {
     await sendMail({
@@ -95,13 +90,9 @@ const submit = async (input, deps = {}) => {
       envelope: { from: envelopeFrom, to },
       to,
       replyTo: { name: fields.name, address: fields.email },
-      subject: `[KOVENIK support] ${fields.subject}`,
-      text: lines.join("\n"),
-      html:
-        `<p><strong>Name:</strong> ${escapeHtml(fields.name)}<br>` +
-        `<strong>Email:</strong> ${escapeHtml(fields.email)}<br>` +
-        `<strong>Order number:</strong> ${escapeHtml(fields.orderNumber || "not given")}</p>` +
-        `<p>${escapeHtml(fields.message).replace(/\n/g, "<br>")}</p>`,
+      subject: inbound.subject,
+      text: inbound.text,
+      html: inbound.html,
     });
   } catch (error) {
     console.error("Support e-mail failed:", error.code || error.message);

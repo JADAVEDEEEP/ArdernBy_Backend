@@ -173,7 +173,7 @@ const textOrderSummary = ({ lines = [], subtotal, discount, couponCode, shipping
 //   blocks     - [{ html, text }] extra content, in order
 //   cta        - { label, url } primary button
 //   outro      - closing sentence(s)
-const renderEmail = ({ preheader = "", heading, intro = "", blocks = [], cta = null, outro = "" }) => {
+const renderEmail = ({ preheader = "", heading, intro = "", blocks = [], cta = null, outro = "", internal = false }) => {
   const mail = supportEmail();
   const year = new Date().getFullYear();
 
@@ -212,9 +212,11 @@ const renderEmail = ({ preheader = "", heading, intro = "", blocks = [], cta = n
     body +
     `</td></tr>` +
     // support
-    `<tr><td style="padding:0 32px 32px 32px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid ${COLORS.line};"><tr><td style="padding-top:20px;font-family:${FONT};font-size:13px;line-height:20px;color:${COLORS.muted};">` +
-    `Questions? ${mail ? `Write to <a href="mailto:${esc(mail)}" style="color:${COLORS.ink};">${esc(mail)}</a> or ` : ""}<a href="${esc(link.contact())}" style="color:${COLORS.ink};">contact support</a>.` +
-    `</td></tr></table></td></tr>` +
+    (internal
+      ? ""
+      : `<tr><td style="padding:0 32px 32px 32px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid ${COLORS.line};"><tr><td style="padding-top:20px;font-family:${FONT};font-size:13px;line-height:20px;color:${COLORS.muted};">` +
+        `Questions? ${mail ? `Write to <a href="mailto:${esc(mail)}" style="color:${COLORS.ink};">${esc(mail)}</a> or ` : ""}<a href="${esc(link.contact())}" style="color:${COLORS.ink};">contact support</a>.` +
+        `</td></tr></table></td></tr>`) +
     // footer
     `<tr><td align="center" bgcolor="${COLORS.panel}" style="background:${COLORS.panel};padding:24px 24px 28px 24px;font-family:${FONT};font-size:12px;line-height:20px;color:${COLORS.muted};">` +
     `<div style="font-size:14px;font-weight:800;letter-spacing:5px;color:${COLORS.ink};margin-bottom:10px;">KOVENIK</div>` +
@@ -233,8 +235,8 @@ const renderEmail = ({ preheader = "", heading, intro = "", blocks = [], cta = n
     outro ? `\n${outro}` : "",
     "",
     "--",
-    `Questions? ${mail ? `Write to ${mail} or visit ` : "Visit "}${link.contact()}`,
-    `Shipping: ${link.shipping()}  Returns: ${link.returns()}  FAQs: ${link.faqs()}`,
+    internal ? "" : `Questions? ${mail ? `Write to ${mail} or visit ` : "Visit "}${link.contact()}`,
+    internal ? "" : `Shipping: ${link.shipping()}  Returns: ${link.returns()}  FAQs: ${link.faqs()}`,
     `© ${year} KOVENIK`,
   ]
     .filter((line, index, all) => line !== "" || (index > 0 && all[index - 1] !== ""))
@@ -249,6 +251,13 @@ const blocks = {
   summary: (data) => ({ html: orderSummary(data), text: textOrderSummary(data) }),
   note: (text) => ({ html: text ? noteBox(text) : "", text: text || "" }),
   paragraph: (text) => ({ html: text ? paragraph(text) : "", text: text || "" }),
+  // A customer's own words, shown as a quoted message (line breaks kept).
+  message: (text) => ({
+    html: !text ? "" :
+      `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px 0;"><tr>` +
+      `<td style="background:${COLORS.panel};border-left:3px solid ${COLORS.accent};padding:18px 20px;font-family:${FONT};font-size:15px;line-height:24px;color:${COLORS.ink};">${esc(text).replace(/\n/g, "<br>")}</td></tr></table>`,
+    text: text || "",
+  }),
   // A prominent one-time code (OTP).
   code: (value) => (!value ? { html: "", text: "" } : {
     html:
