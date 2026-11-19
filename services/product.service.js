@@ -23,6 +23,10 @@ const AUDIT_FIELDS = [
   "limited_edition",
 ];
 
+// A product tagged "hidden" is kept in the database but never shown in the shop, search or
+// on its own page. Remove the tag to bring it back.
+const NOT_HIDDEN = "FIND_IN_SET('hidden', REPLACE(COALESCE(tags, ''), ' ', '')) = 0";
+
 const productSnapshot = async (pool, id) => {
   try {
     const [rows] = await pool.execute(
@@ -107,6 +111,7 @@ const getAllProducts = async ({
           OR category_slug = ?
           OR FIND_IN_SET(?, REPLACE(tags, ' ', '')) > 0
         )
+        AND ${NOT_HIDDEN}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
     `,
@@ -138,6 +143,7 @@ const getAllProducts = async ({
           OR category_slug = ?
           OR FIND_IN_SET(?, REPLACE(tags, ' ', '')) > 0
         )
+        AND ${NOT_HIDDEN}
     `,
     [
       searchValue,
@@ -248,6 +254,7 @@ const getProductBySlug = async (slug) => {
         updated_at
       FROM products
       WHERE slug = ?
+        AND ${NOT_HIDDEN}
       LIMIT 1
     `,
     [slug]
