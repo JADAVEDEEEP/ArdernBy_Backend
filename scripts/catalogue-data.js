@@ -9,7 +9,7 @@ const COLLECTIONS = {
   "Kovenik Premium": "ardenby-premium", // slug kept: URLs, orders and carts reference it
   "The Print Club": "the-print-club",
   "Epic Thread": "epic-thread",
-  "Supreme Edition": "supreme-edition",
+  "Apex Edition": "apex-edition",
 };
 
 const CATEGORY_TAG = { "Top Wear": "top-wear", "Bottom Wear": "bottom-wear", "Plus Size": "plus-size" };
@@ -80,7 +80,7 @@ const NEW_PRODUCTS = [
     desc: "Raised puff print on a boxy off-white heavyweight tee. The graphic sits proud of the fabric for a tactile, studio-made finish. Limited run from The Print Club.",
   },
   {
-    code: "WCH", name: "Washed Charcoal Heavyweight Tee", collection: "Supreme Edition", categories: ["Top Wear"],
+    code: "WCH", name: "Washed Charcoal Heavyweight Tee", collection: "Apex Edition", categories: ["Top Wear"],
     fit: "Oversized", gsm: 280, mrp: 1799, price: 1499, color: "Charcoal", fabric: "100% Cotton",
     coverage: "Front", limited: 0, bestSeller: 1, isNew: 0,
     type: "t-shirt", print: "a plain washed-charcoal tee with a small woven chest label",
@@ -101,7 +101,7 @@ const NEW_PRODUCTS = [
     desc: "A large koi-and-wave illustration runs across the back of this black oversized tee. Quiet from the front, loud when you walk away.",
   },
   {
-    code: "HGH", name: "Heavyweight Grey Hoodie", collection: "Supreme Edition", categories: ["Top Wear"],
+    code: "HGH", name: "Heavyweight Grey Hoodie", collection: "Apex Edition", categories: ["Top Wear"],
     fit: "Relaxed", gsm: 400, mrp: 2999, price: 2499, color: "Heather Grey", fabric: "Cotton Fleece",
     coverage: "Front", limited: 0, bestSeller: 0, isNew: 1,
     type: "pullover hoodie", print: "a plain heather-grey hoodie with a kangaroo pocket",
@@ -115,7 +115,7 @@ const NEW_PRODUCTS = [
     desc: "Full-zip hoodie in dense 380 GSM black fleece with a matte metal zip and ribbed cuffs. Clean, minimal and made to layer.",
   },
   {
-    code: "OOS", name: "Olive Overshirt", collection: "Supreme Edition", categories: ["Top Wear"],
+    code: "OOS", name: "Olive Overshirt", collection: "Apex Edition", categories: ["Top Wear"],
     fit: "Relaxed", gsm: null, mrp: 2499, price: 1999, color: "Olive", fabric: "Cotton Twill",
     coverage: "Front", limited: 0, bestSeller: 0, isNew: 1,
     type: "button-up overshirt", print: "a plain olive cotton-twill overshirt with two chest pockets",
@@ -129,7 +129,7 @@ const NEW_PRODUCTS = [
     desc: "Lightweight blue chambray with a fine white polka print and a camp collar. Easy to dress up or down through the warm months.",
   },
   {
-    code: "BRC", name: "Black Relaxed Cargo Pants", collection: "Supreme Edition", categories: ["Bottom Wear"],
+    code: "BRC", name: "Black Relaxed Cargo Pants", collection: "Apex Edition", categories: ["Bottom Wear"],
     fit: "Relaxed", gsm: null, mrp: 2499, price: 1999, color: "Black", fabric: "Cotton Twill",
     coverage: "Front", limited: 0, bestSeller: 0, isNew: 1,
     type: "cargo pants", print: "plain black relaxed cargo pants with large flap pockets",
