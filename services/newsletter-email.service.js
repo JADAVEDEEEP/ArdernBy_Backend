@@ -360,6 +360,8 @@ const renderEmail = (design, { subject = "", preheader = "", products = {}, mode
 
   const ctx = { style: clean.style, products, money };
   const unsubUrl = mode === "send" ? UNSUBSCRIBE_PLACEHOLDER : "#";
+  // Newsletter mail has no inbox behind it, so readers are pointed to the Contact page instead.
+  const contactUrl = `${String(process.env.SITE_URL || process.env.FRONTEND_URL || "https://ardenby.vercel.app").trim().replace(/\/+$/, "")}/contact`;
   const font = FONTS[clean.style.font];
   const year = new Date().getFullYear();
 
@@ -371,6 +373,7 @@ const renderEmail = (design, { subject = "", preheader = "", products = {}, mode
     `<tr><td align="center" bgcolor="${BRAND.panel}" style="background:${BRAND.panel};padding:24px 24px 28px 24px;font-family:${font};font-size:12px;line-height:20px;color:${BRAND.muted};">` +
     `<div style="font-size:14px;font-weight:800;letter-spacing:5px;color:${clean.style.headingColor};margin-bottom:10px;">KOVENIK</div>` +
     `<div style="margin-bottom:10px;">You are receiving this email because you subscribed to the KOVENIK newsletter.</div>` +
+    `<div style="margin-bottom:10px;">Please do not reply to this email. Need help? <a href="${esc(contactUrl)}" style="color:${clean.style.headingColor};text-decoration:underline;">Contact us</a>.</div>` +
     `<div style="margin-bottom:10px;"><a href="${esc(unsubUrl)}" style="color:${clean.style.headingColor};text-decoration:underline;font-weight:700;">Unsubscribe</a>` +
     (mode === "test" ? ` <span style="color:#7A4B00;">(test email: in a real send this link unsubscribes the reader)</span>` : "") +
     `</div>` +
@@ -394,6 +397,7 @@ const renderEmail = (design, { subject = "", preheader = "", products = {}, mode
     ...clean.blocks.map((b) => blockText(b, ctx)).filter(Boolean).flatMap((t) => [t, ""]),
     "--",
     "You are receiving this email because you subscribed to the KOVENIK newsletter.",
+    `Please do not reply to this email. Need help? Contact us: ${contactUrl}`,
     `Unsubscribe: ${mode === "send" ? UNSUBSCRIBE_PLACEHOLDER : "(link in the real email)"}`,
     address.complete ? address.line : `${address.base}, [PIN code not set]`,
     `© ${year} KOVENIK`,
