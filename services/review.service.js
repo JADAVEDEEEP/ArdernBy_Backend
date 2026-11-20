@@ -236,7 +236,10 @@ const getReviews = async ({ slug, page = 1, limit = PAGE_SIZE_DEFAULT }) => {
   const hidden = await hiddenReviewIds(pool, product.id);
   const visibleOnly = hidden.length ? ` AND id NOT IN (${hidden.map(() => "?").join(", ")})` : "";
 
-  const [statRows] = await pool.execute(
+  const offset = (currentPage - 1) * pageSize;
+  // Totals and the page of reviews don't depend on each other: run them together.
+  const [[statRows], [rows]] = await Promise.all([
+   pool.execute(
     `
       SELECT ROUND(rating) AS stars, COUNT(*) AS total, SUM(rating) AS sum_rating
       FROM product_reviews
@@ -244,7 +247,18 @@ const getReviews = async ({ slug, page = 1, limit = PAGE_SIZE_DEFAULT }) => {
       GROUP BY ROUND(rating)
     `,
     [product.id, ...hidden]
-  );
+   ),
+   pool.execute(
+    `
+      SELECT id, author_name, rating, review_date, title, comment, verified, created_at
+      FROM product_reviews
+      WHERE product_id = ?${visibleOnly}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${pageSize} OFFSET ${offset}
+    `,
+    [product.id, ...hidden]
+   ),
+  ]);
 
   const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
   let count = 0;
@@ -256,20 +270,6 @@ const getReviews = async ({ slug, page = 1, limit = PAGE_SIZE_DEFAULT }) => {
     sum += Number(row.sum_rating);
   }
   const average = count > 0 ? Math.round((sum / count) * 10) / 10 : 0;
-
-  // LIMIT/OFFSET are validated integers, interpolated because mysql2 prepared
-  // statements reject them as bound parameters on some servers.
-  const offset = (currentPage - 1) * pageSize;
-  const [rows] = await pool.execute(
-    `
-      SELECT id, author_name, rating, review_date, title, comment, verified, created_at
-      FROM product_reviews
-      WHERE product_id = ?${visibleOnly}
-      ORDER BY created_at DESC, id DESC
-      LIMIT ${pageSize} OFFSET ${offset}
-    `,
-    [product.id, ...hidden]
-  );
 
   return {
     summary: { average, count, distribution },

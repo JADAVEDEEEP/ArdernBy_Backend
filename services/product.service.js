@@ -258,49 +258,21 @@ const getProductBySlug = async (slug) => {
 
   const product = rows[0];
 
-  // ==========================================
-  // GET PRODUCT IMAGES
-  // ==========================================
-
-  const [imageRows] = await pool.execute(
-    `
-      SELECT
-        id,
-        image_url,
-        sort_order,
-        is_primary,
-        created_at
-      FROM product_images
-      WHERE product_id = ?
-      ORDER BY sort_order ASC
-    `,
-    [product.id]
-  );
+  // Images and variants are independent: fetch them together (one round trip, not two).
+  const [[imageRows], [variantRows]] = await Promise.all([
+    pool.execute(
+      `SELECT id, image_url, sort_order, is_primary, created_at
+         FROM product_images WHERE product_id = ? ORDER BY sort_order ASC`,
+      [product.id]
+    ),
+    pool.execute(
+      `SELECT id, product_id, size, color, inventory, sku, created_at, updated_at
+         FROM product_variants WHERE product_id = ? ORDER BY created_at ASC`,
+      [product.id]
+    ),
+  ]);
 
   product.images = imageRows;
-
-  // ==========================================
-  // GET PRODUCT VARIANTS
-  // ==========================================
-
-  const [variantRows] = await pool.execute(
-    `
-      SELECT
-        id,
-        product_id,
-        size,
-        color,
-        inventory,
-        sku,
-        created_at,
-        updated_at
-      FROM product_variants
-      WHERE product_id = ?
-      ORDER BY created_at ASC
-    `,
-    [product.id]
-  );
-
   product.variants = variantRows;
 
   return product;
