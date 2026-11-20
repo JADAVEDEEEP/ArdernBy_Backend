@@ -162,51 +162,43 @@ const getAllProducts = async ({
   // ADD IMAGES + VARIANTS
   // ==========================================
 
-  for (const product of products) {
-    // ------------------------------------------
-    // GET IMAGES
-    // ------------------------------------------
+  // Two batched queries for the whole page (was 2 queries PER product, ~100 sequential
+  // round trips to the remote database, which took ~25s).
+  if (products.length) {
+    const ids = products.map((p) => p.id);
+    const marks = ids.map(() => "?").join(",");
 
-    const [imageRows] = await pool.execute(
-      `
-        SELECT
-          id,
-          image_url,
-          sort_order,
-          is_primary,
-          created_at
-        FROM product_images
-        WHERE product_id = ?
-        ORDER BY sort_order ASC
-      `,
-      [product.id]
-    );
+    const [[imageRows], [variantRows]] = await Promise.all([
+      pool.query(
+        `SELECT id, product_id, image_url, sort_order, is_primary, created_at
+           FROM product_images
+          WHERE product_id IN (${marks})
+          ORDER BY sort_order ASC`,
+        ids
+      ),
+      pool.query(
+        `SELECT id, product_id, size, color, inventory, sku, created_at, updated_at
+           FROM product_variants
+          WHERE product_id IN (${marks})
+          ORDER BY created_at ASC`,
+        ids
+      ),
+    ]);
 
-    product.images = imageRows;
-
-    // ------------------------------------------
-    // GET VARIANTS
-    // ------------------------------------------
-
-    const [variantRows] = await pool.execute(
-      `
-        SELECT
-          id,
-          product_id,
-          size,
-          color,
-          inventory,
-          sku,
-          created_at,
-          updated_at
-        FROM product_variants
-        WHERE product_id = ?
-        ORDER BY created_at ASC
-      `,
-      [product.id]
-    );
-
-    product.variants = variantRows;
+    const imagesBy = new Map();
+    const variantsBy = new Map();
+    for (const r of imageRows) {
+      if (!imagesBy.has(r.product_id)) imagesBy.set(r.product_id, []);
+      imagesBy.get(r.product_id).push(r);
+    }
+    for (const r of variantRows) {
+      if (!variantsBy.has(r.product_id)) variantsBy.set(r.product_id, []);
+      variantsBy.get(r.product_id).push(r);
+    }
+    for (const product of products) {
+      product.images = (imagesBy.get(product.id) || []).map(({ product_id, ...img }) => img);
+      product.variants = variantsBy.get(product.id) || [];
+    }
   }
 
   return {

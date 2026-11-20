@@ -67,6 +67,19 @@ app.use(
   })
 );
 
+// Public catalogue reads are the same for everyone, so browsers/CDNs may reuse them briefly.
+// (Only plain list GETs: product detail, search and everything personal stay no-store.)
+const shortCache = (req, res, next) => {
+  if (req.method === "GET" && req.path === "/" && !req.headers.authorization) {
+    res.setHeader("Cache-Control", "public, max-age=30, s-maxage=60, stale-while-revalidate=300");
+  }
+  next();
+};
+app.get("/api/health", (req, res) => res.json({ ok: true }));
+app.use("/api/products", shortCache);
+app.use("/api/categories", shortCache);
+app.use("/api/banners", shortCache);
+
 // Routes
 app.use("/api/products", productRouter);
 app.use("/api/auth",authRouter)
